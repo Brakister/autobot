@@ -696,10 +696,17 @@ class TecDocAutomator:
 
         Depois de buscar ou de aplicar filtro de marcas, a grid recarrega e as
         linhas mudam; clicar durante esse re-render pega linha errada (404).
+
+        Após alguns segundos, aceita "contagem estável" (mesma quantidade de
+        linhas em 2 amostras seguidas): a AG-Grid costuma ficar re-renderizando
+        o conteúdo/ordem sem mudar o número de linhas, e a leitura real (por
+        row-id + goto direto) não depende do texto da 1ª linha ficar parado.
+        Isso impede a espera de dar o timeout inteiro (ex.: 45s) à toa.
         """
         page = self._page
         inicio = time.time()
         amostras: list[tuple[int, str]] = []
+        contagens: list[int] = []
         while time.time() - inicio < tempo_max_s:
             try:
                 linha = page.locator(SELETORES["resultado"]["linha"])
@@ -714,15 +721,58 @@ class TecDocAutomator:
                     pass
             if n == 0:
                 amostras.clear()
+                contagens.clear()
             else:
                 amostras.append((n, primeiro))
+                contagens.append(n)
                 if len(amostras) > config.GRID_STABLE_SAMPLES:
                     amostras.pop(0)
+                    contagens.pop(0)
                 if (len(amostras) >= config.GRID_STABLE_SAMPLES
                         and len(set(amostras)) == 1):
                     return True
+                if (time.time() - inicio >= 6.0
+                        and len(contagens) >= config.GRID_STABLE_SAMPLES
+                        and len(set(contagens)) == 1):
+                    return True
             time.sleep(0.35)
         return False
+
+    def _aguardar_grid_filtrada(self, tempo_max_s: float = 8.0) -> None:
+        """Espera a grid mostrar as linhas da marca do filtro (sinal dinâmico).
+
+        Em vez de networkidle + timeout cego depois de filtrar, observa a
+        própria grid: assim que a PRIMEIRA linha visível exibir a marca
+        selecionada (a AG-Grid ordena por marca após o filtro), o re-render
+        terminou e dá pra ler e correr pro detalhe. Retorna quase de
+        imediato no caso normal; se a marca não aparecer, deixa o
+        `_extrair_dom` decidir como sempre fez.
+        """
+        page = self._page
+        inicio = time.time()
+        linhas = page.locator(
+            ".ag-row[row-id], table tbody tr, .article-row, .result-row"
+        )
+        # respiro mínimo pro servidor/AG-Grid trocar os dados; sem isso a
+        # primeira amostra ainda vê a grid SEM filtro (linhas antigas) e a
+        # 1ª linha pode não ser da marca (aí a gente espera — sem risco).
+        page.wait_for_timeout(800)
+        while time.time() - inicio < tempo_max_s:
+            try:
+                n = linhas.count()
+            except Exception:
+                n = 0
+            if n:
+                for i in range(min(n, 3)):
+                    try:
+                        texto = linhas.nth(i).inner_text(timeout=800)
+                        marca = self._cel_texto(
+                            linhas.nth(i), "resultado", "cel_marca", texto)
+                    except Exception:
+                        marca = ""
+                    if self._marca_bate(marca):
+                        return
+            page.wait_for_timeout(300)
 
     def _aplicar_filtros_marca(self) -> None:
         """Seleciona as marcas no filtro nativo do site (só 1x por execução).
@@ -913,12 +963,24 @@ class TecDocAutomator:
         except Exception:
             raise BuscaNaoIniciadaError(
                 f"Campo de busca não encontrado ({codigo})")
+        recarregado = False
         for _ in range(60):  # até 30s para o campo ficar visível
             try:
                 if campo.is_visible():
                     break
             except Exception:
                 pass
+            # Atalho de velocidade: em vez de encarar 30s esperando o campo,
+            # se ele não aparece em ~6s recarrega a raiz uma vez (recupera a
+            # SPA de qualquer estado estranho) e continua verificando.
+            if _ > 12 and not recarregado:
+                recarregado = True
+                self._msg("Campo de busca não visível — recarregando o catálogo")
+                try:
+                    page.goto(config.TECDOC_URL, wait_until="domcontentloaded")
+                    page.wait_for_timeout(800)
+                except Exception:
+                    pass
             time.sleep(0.5)
         else:
             raise BuscaNaoIniciadaError(
@@ -989,7 +1051,7 @@ class TecDocAutomator:
 
         try:
             self._preencher_busca(codigo)
-            page.wait_for_load_state("networkidle", timeout=2_500)
+            page.wait_for_load_state("networkidle", timeout=1_200)
         except TimeoutError:
             pass
         except BuscaNaoIniciadaError as exc:
@@ -1008,12 +1070,9 @@ class TecDocAutomator:
         if (not self._filtro_aplicado
                 and _APLICAR_FILTRO_MARCAS_SITE):
             self._aplicar_filtros_marca()
-            try:
-                page.wait_for_load_state("networkidle", timeout=15_000)
-            except TimeoutError:
-                pass
-            # e espera a grid recarregar com as marcas selecionadas
-            self._aguardar_grid_estavel(tempo_max_s=45.0)
+            # Espera dinâmica: para quando a grid mostrar a(s) marca(s)
+            # selecionada(s) — nada de networkidle cego + timeout de 45s.
+            self._aguardar_grid_filtrada(tempo_max_s=8.0)
 
         # ---- 1) API + detalhe DOM ------------------------------------------
         parser = _ParserApi(resultado, self.marcas)
@@ -1313,7 +1372,7 @@ class TecDocAutomator:
         costuma demorar mais que a checagem imediata.
         """
         page = self._page
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(1500)
         for _ in range(tentativas):
             try:
                 if (page.locator(SELETORES["detalhe"]["sumario"]).count() > 0
@@ -1405,7 +1464,7 @@ class TecDocAutomator:
             else:
                 self._rastro_abrir(f"goto direto: {nova_url[:200]}")
                 page.goto(nova_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(400)
             # se o site derrubou na raiz/catálogo inexistente, não insiste
             if ("catalog-not-found" in page.url
                     or page.url.rstrip("/") == "https://web.tecalliance.net"):
@@ -1424,7 +1483,7 @@ class TecDocAutomator:
                     page.reload(wait_until="domcontentloaded")
                 except Exception:
                     pass
-                page.wait_for_timeout(800)
+                page.wait_for_timeout(500)
                 ok = self._aguardar_detalhe(50)
                 self._rastro_abrir(f"[{resultado.codigo}] retry "
                                    f"{'ok' if ok else 'continua sem renderizar'}.")
@@ -1432,7 +1491,7 @@ class TecDocAutomator:
                 self._rastro_abrir(
                     f"[{resultado.codigo}] goto direto não abriu o artigo.")
                 return False
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(300)
             self._extrair_detalhe(resultado)
             return True
         except Exception as exc:
@@ -1641,7 +1700,7 @@ class TecDocAutomator:
                     inp = ac.locator("input").first
                     if inp.count():
                         inp.click(timeout=2_500)
-                page.wait_for_timeout(400)
+                page.wait_for_timeout(300)
 
             opcoes = page.locator(
                 "li.p-autocomplete-item[role='option']:visible, "
@@ -1672,7 +1731,7 @@ class TecDocAutomator:
                     page.keyboard.press("Escape")
                     continue
                 opcao.click(timeout=2_500)
-                page.wait_for_timeout(800)
+                page.wait_for_timeout(500)
                 if tabela.count():
                     cels = tabela.locator("tbody tr td:first-child")
                     for j in range(cels.count()):
@@ -1907,6 +1966,7 @@ def executar_busca(
         automator.iniciar()
         automator.garantir_login()
         total = len(codigos)
+        marca_anterior: str | None = None
         for i, item in enumerate(codigos, start=1):
             if isinstance(item, dict):
                 codigo = str(item.get("codigo", "")).strip()
@@ -1918,9 +1978,20 @@ def executar_busca(
                 on_progress(i, total, codigo)
             if not codigo:
                 continue
-            try:
+            if i > 1:
+                config.pausa_entre_codigos()
+            # A marca informada na própria linha tem prioridade. O filtro é
+            # resetado para permitir marcas diferentes na mesma lista; se a
+            # marca for a MESMA do código anterior, mantém o filtro do site
+            # (o SPA preserva brands= entre buscas) e pula o reload do shell
+            # — economia de ~1min por código em lote.
+            marca_item_norm = marca_item.strip().lower()
+            if i == 1 or marca_item_norm != marca_anterior:
+                marca_anterior = marca_item_norm
+                automator._filtro_aplicado = False
+                automator._filtro_efetivado = False
+                automator.marcas = [marca_item] if marca_item else (marcas or [])
                 if i > 1:
-                    config.pausa_entre_codigos()
                     # Volta à raiz do site pra limpar o estado da SPA
                     # (brands=, groups=, fragmento de busca antigo).
                     # Não usamos goto pra uma URL de busca porque a SPA
@@ -1934,11 +2005,12 @@ def executar_busca(
                     except TimeoutError:
                         pass
                     automator._page.wait_for_timeout(500)
-                # A marca informada na própria linha tem prioridade. O filtro
-                # é resetado para permitir marcas diferentes na mesma lista.
-                automator.marcas = [marca_item] if marca_item else (marcas or [])
-                automator._filtro_aplicado = False
-                automator._filtro_efetivado = False
+            else:
+                # mesma marca: filtro já aplicado no site; pula o reload do
+                # shell e digita direto no campo do cabeçalho da SPA.
+                automator._filtro_aplicado = True
+                automator._filtro_efetivado = True
+            try:
                 res = automator.buscar_codigo(codigo)
             except Exception as exc:
                 automator._rastro_abrir(
