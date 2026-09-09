@@ -1,0 +1,38 @@
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.spec.orig
+
+# Dados gerados (não versionar)
+data/
+resultados.csv
+resultados.xlsx
+*.log
+
+# Segredos / credenciais (nunca subir)
+.env
+.env.*
+!.env.example
+session*
+*token*
+*.pem
+*.key
+*.pfx
+
+# Scripts de diagnóstico que contêm email/credenciais embutidos
+diag_*.py
+
+# Sistema / navegador
+Thumbs.db
+.DS_Store
+desktop.ini
+*.keep
+

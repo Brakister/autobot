@@ -1,0 +1,3 @@
+PySide6>=6.5
+playwright>=1.40
+openpyxl>=3.1
