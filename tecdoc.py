@@ -1721,9 +1721,14 @@ class TecDocAutomator:
         resultado.cross_refs = xrefs or resultado.cross_refs
 
     def _extrair_gtin(self, resultado: PecaResultado) -> None:
-        """Extrai o GTIN/EAN do artigo por várias estratégias (reforçado)."""
+        """Extrai o GTIN/EAN do artigo por várias estratégias (reforçado).
+
+        O GTIN é carregado de forma assíncrona e nem sempre está renderizado
+        na primeira leitura — então faz POLLING: tenta achar, espera um pouco
+        e repete até encontrar (ou estourar o timeout). Evita o caso de pegar
+        no 1º artigo e não no 2º por causa de timing.
+        """
         page = self._page
-        candidatos: list[str] = []
 
         def _texto(el, *args) -> str:
             try:
@@ -1742,79 +1747,99 @@ class TecDocAutomator:
                     out.append(loc.nth(i))
                 return out
 
-        # 1) th[scope='row'] / th com rótulo GTIN/EAN e td irmão
-        for th in _todos(page.locator(
-            "th[scope='row'], part-detail-v2-summary-table th"
-        )):
-            rotulo = self._norm(_texto(th))
-            if any(rotulo.startswith(r) for r in
-                   ("gtin", "ean", "código de barra", "codigo de barra")):
-                td = th.locator("xpath=following-sibling::td[1]")
-                v = _texto(td.first) if td.count() else ""
-                if v:
-                    candidatos.append(v)
+        def _coletar() -> list[str]:
+            """Roda as 4 estratégias de uma vez e devolve os textos candidatos."""
+            cand: list[str] = []
 
-        # 2) elemento de rótulo com "GTIN"/"EAN" e o próximo irmão
-        if not candidatos:
-            for sel in ("dt", "label", ".label", "th"):
-                for el in _todos(page.locator(sel)):
-                    rotulo = self._norm(_texto(el))
-                    if rotulo and any(rotulo.startswith(r) for r in
-                                      ("gtin", "ean")):
-                        irmao = el.locator(
-                            "xpath=following-sibling::*[1]").first
-                        v = _texto(irmao) if irmao.count() else ""
-                        if v:
-                            candidatos.append(v)
-                        pai = el.locator("xpath=..").first
-                        if pai.count():
-                            try:
-                                for t in pai.locator("td, .p-component, div"):
-                                    t2 = _texto(t)
-                                    if t2:
-                                        candidatos.append(t2)
-                            except Exception:
-                                pass
+            # 1) th[scope='row'] / th com rótulo GTIN/EAN e td irmão
+            for th in _todos(page.locator(
+                "th[scope='row'], part-detail-v2-summary-table th"
+            )):
+                rotulo = self._norm(_texto(th))
+                if any(rotulo.startswith(r) for r in
+                       ("gtin", "ean", "código de barra", "codigo de barra")):
+                    td = th.locator("xpath=following-sibling::td[1]")
+                    v = _texto(td.first) if td.count() else ""
+                    if v:
+                        cand.append(v)
+
+            # 2) elemento de rótulo com "GTIN"/"EAN" e o próximo irmão
+            if not cand:
+                for sel in ("dt", "label", ".label", "th"):
+                    for el in _todos(page.locator(sel)):
+                        rotulo = self._norm(_texto(el))
+                        if rotulo and any(rotulo.startswith(r) for r in
+                                          ("gtin", "ean")):
+                            irmao = el.locator(
+                                "xpath=following-sibling::*[1]").first
+                            v = _texto(irmao) if irmao.count() else ""
+                            if v:
+                                cand.append(v)
+                            pai = el.locator("xpath=..").first
+                            if pai.count():
+                                try:
+                                    for t in pai.locator(
+                                            "td, .p-component, div"):
+                                        t2 = _texto(t)
+                                        if t2:
+                                            cand.append(t2)
+                                except Exception:
+                                    pass
+                            break
+                    if cand:
                         break
-                if candidatos:
-                    break
 
-        # 3) atributos / itemprop
-        if not candidatos:
-            for atr in ("itemprop", "data-gtin", "data-ean"):
-                for el in _todos(page.locator(f"[{atr}]")):
-                    try:
-                        v_attr = el.get_attribute(atr) or ""
-                    except Exception:
-                        continue
-                    rotulo = self._norm(v_attr)
-                    if rotulo.startswith("gtin") or rotulo in ("ean", "gtin13"):
-                        pai = el.locator("xpath=..").first
-                        v = _texto(pai) if pai.count() else ""
-                        if v:
-                            candidatos.append(v)
-                        v2 = _texto(pai.locator("td, .p-component, div").first) \
-                            if pai.count() else ""
-                        if v2:
-                            candidatos.append(v2)
-                if candidatos:
-                    break
+            # 3) atributos / itemprop
+            if not cand:
+                for atr in ("itemprop", "data-gtin", "data-ean"):
+                    for el in _todos(page.locator(f"[{atr}]")):
+                        try:
+                            v_attr = el.get_attribute(atr) or ""
+                        except Exception:
+                            continue
+                        rotulo = self._norm(v_attr)
+                        if rotulo.startswith("gtin") or rotulo in (
+                                "ean", "gtin13"):
+                            pai = el.locator("xpath=..").first
+                            v = _texto(pai) if pai.count() else ""
+                            if v:
+                                cand.append(v)
+                            v2 = _texto(pai.locator(
+                                "td, .p-component, div").first) \
+                                if pai.count() else ""
+                            if v2:
+                                cand.append(v2)
+                    if cand:
+                        break
 
-        # 4) fallback: número "parecido com GTIN" no texto do corpo
-        if not candidatos:
-            todos = _texto(page.locator("body"))
-            match = re.search(
-                r"GTIN[:\s]*([0-9]{8,14})", todos, re.IGNORECASE)
-            if match:
-                candidatos.append(match.group(1))
+            # 4) fallback: número "parecido com GTIN" no texto do corpo
+            if not cand:
+                todos = _texto(page.locator("body"))
+                match = re.search(
+                    r"GTIN[:\s]*([0-9]{8,14})", todos, re.IGNORECASE)
+                if match:
+                    cand.append(match.group(1))
+            return cand
+
+        def _valor_valido(cand: list[str]) -> str:
+            melhor = ""
+            for raw in cand:
+                digitos = re.sub(r"[^0-9]", "", (raw or "").strip())
+                # GTIN usual: 8, 12, 13 ou 14 dígitos
+                if len(digitos) in (8, 12, 13, 14) and digitos != melhor:
+                    melhor = digitos
+                    break
+            return melhor
 
         melhor = ""
-        for raw in candidatos:
-            digitos = re.sub(r"[^0-9]", "", (raw or "").strip())
-            # GTIN usual: 8, 12, 13 ou 14 dígitos
-            if len(digitos) in (8, 12, 13, 14) and digitos != melhor:
-                melhor = digitos
+        # polling: até ~6s (12 tentativas a cada 500ms) enquanto a página
+        # carrega o resumo do artigo. Para antes se já achou.
+        for _ in range(12):
+            melhor = _valor_valido(_coletar())
+            if melhor:
                 break
+            page.wait_for_timeout(500)
+
         if melhor:
             resultado.gtin = melhor
             self._msg(f"[{resultado.codigo}] GTIN: {melhor}")
