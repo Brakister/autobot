@@ -39,7 +39,6 @@ class PecaResultado:
     descricao: str = ""
     marca: str = ""
     gtin: str = ""
-    cilindradas: list[str] = field(default_factory=list)
     aplicacoes: list[str] = field(default_factory=list)
     codigos_aplicacao: list[str] = field(default_factory=list)
     fornecedor: str = ""
@@ -54,7 +53,6 @@ class PecaResultado:
             "descricao": self.descricao,
             "marca": self.marca,
             "gtin": self.gtin,
-            "cilindradas": self.cilindradas,
             "aplicacoes": self.aplicacoes,
             "codigos_aplicacao": self.codigos_aplicacao,
             "fornecedor": self.fornecedor,
@@ -817,20 +815,34 @@ class TecDocAutomator:
                         try:
                             sel.first.click()
                             campo.first.wait_for(state="visible",
-                                                  timeout=3_000)
+                                                 timeout=3_000)
                         except Exception:
                             self._msg(f"Filtro: painel não reabriu; "
                                       f"parando em '{marca}'.")
                             break
+                    # Digitação confiável no PrimeNG: foca, limpa com Ctrl+A,
+                    # preenche com fill (que substitui tudo) e, se o evento de
+                    # filtragem não disparar, digita char a char.
                     try:
-                        campo.first.fill("")
+                        campo.first.click()
+                        campo.first.press("Control+A")
                         campo.first.fill(marca)
                     except Exception:
                         try:
                             campo.first.type(marca)
                         except Exception:
                             continue
+                    # Se o fill não disparou o filtro, as opções continuam
+                    # mostrando a marca anterior — força redigitação.
                     opcao = self._achar_opcao_marca(marca)
+                    if opcao is None and marca.strip():
+                        try:
+                            campo.first.fill("")
+                            campo.first.press_sequential(
+                                marca, delay=20)
+                            opcao = self._achar_opcao_marca(marca)
+                        except Exception:
+                            pass
                     if opcao is None:
                         self._msg(f"Filtro: '{marca}' não apareceu nas opções.")
                         page.keyboard.press("Escape")
@@ -842,7 +854,7 @@ class TecDocAutomator:
                             box.click()
                         else:
                             opcao.click()
-                        page.wait_for_timeout(250)
+                        page.wait_for_timeout(150)
                         escolhidas.append(marca)
                     except Exception:
                         pass
@@ -862,17 +874,17 @@ class TecDocAutomator:
                                 SELETORES["filtros"]["check"]).first
                             b.click()
                             escolhidas.append(alvo_map[a])
-                            page.wait_for_timeout(250)
+                            page.wait_for_timeout(150)
                         except Exception:
                             pass
 
             # O TecDoc atualiza a URL de forma assíncrona depois do checkbox.
             # Aguarda essa confirmação antes de fechar o overlay e ler a grid.
             if escolhidas:
-                for _ in range(30):
+                for _ in range(40):
                     if "brands=" in page.url:
                         break
-                    page.wait_for_timeout(250)
+                    page.wait_for_timeout(150)
             page.keyboard.press("Escape")
             page.wait_for_timeout(300)
             if escolhidas:
@@ -886,11 +898,72 @@ class TecDocAutomator:
                 self._filtro_efetivado = "brands=" in page.url
             except Exception:
                 self._filtro_efetivado = False
+            # Retry: o checkbox às vezes não "pega" no clique do Playwright.
+            # Se selecionou marcas mas a URL não mudou, reabre o overlay e
+            # confere estado de cada opção; re-clica só nas desmarcadas.
+            if escolhidas and not self._filtro_efetivado:
+                self._msg("Filtro não refletiu na URL — tentando retry...")
+                self._filtro_aplicado = False
+                reiniciado = False
+                try:
+                    sel.first.click()
+                    campo.first.refresh() if campo.count() else None
+                    for marca in list(escolhidas):
+                        opcao = self._achar_opcao_marca(marca)
+                        if opcao is None:
+                            continue
+                        marcado = False
+                        try:
+                            estado = self._check_marcado(opcao)
+                            marcado = estado
+                        except Exception:
+                            pass
+                        if not marcado:
+                            box = opcao.locator(
+                                SELETORES["filtros"]["check"]).first
+                            try:
+                                if box.count() > 0:
+                                    box.click(force=True)
+                                else:
+                                    opcao.click(force=True)
+                                reiniciado = True
+                                page.wait_for_timeout(150)
+                            except Exception:
+                                pass
+                    if reiniciado:
+                        for _ in range(30):
+                            if "brands=" in page.url:
+                                break
+                            page.wait_for_timeout(200)
+                except Exception:
+                    pass
+                try:
+                    self._filtro_efetivado = "brands=" in page.url
+                except Exception:
+                    self._filtro_efetivado = False
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(250)
             if escolhidas and not self._filtro_efetivado:
                 self._msg("ATENÇÃO: o filtro não refletiu na URL (?brands=). "
                           "Não vou clicar nos resultados para evitar 404.")
         except Exception as exc:
             self._msg(f"Filtro de marcas falhou: {exc}")
+
+    @staticmethod
+    def _check_marcado(opcao) -> bool:
+        """Descobre se o checkbox da opção está marcado.
+
+        O p-checkbox do PrimeNG pinta o .p-checkbox-box com a classe `p-highlight`
+        (ou `.p-checkbox-checked` no layout antigo) quando selecionado.
+        """
+        try:
+            box = opcao.locator(SELETORES["filtros"]["check"]).first
+            if box.count() == 0:
+                return False
+            cls = box.get_attribute("class") or ""
+            return "p-highlight" in cls or "p-checkbox-checked" in cls
+        except Exception:
+            return False
 
     @staticmethod
     def _norm(txt: str) -> str:
@@ -1585,27 +1658,7 @@ class TecDocAutomator:
         except Exception:
             pass
 
-        # Mantém a extração do content.js antigo: esses campos ficam no
-        # sumário como th[scope="row"] + td, não na linha da AG-Grid.
-        try:
-            linhas_sumario = page.locator(
-                "th[scope='row'], part-detail-v2-summary-table th"
-            )
-            for i in range(linhas_sumario.count()):
-                rotulo = self._norm(linhas_sumario.nth(i).inner_text())
-                celula = linhas_sumario.nth(i).locator("xpath=following-sibling::td[1]")
-                if celula.count() == 0:
-                    continue
-                valor = celula.inner_text().strip()
-                if "gtin" in rotulo and valor:
-                    resultado.gtin = valor
-                if ("cilindrada" in rotulo or "cilindro" in rotulo) and valor:
-                    resultado.cilindradas.extend(
-                        re.findall(r"\d+(?:[.,]\d+)?", valor)
-                    )
-            resultado.cilindradas = list(dict.fromkeys(resultado.cilindradas))
-        except Exception:
-            pass
+        self._extrair_gtin(resultado)
 
         self._extrair_aplicacoes(resultado)
         self._extrair_veiculos(resultado)
@@ -1666,6 +1719,99 @@ class TecDocAutomator:
         except Exception:
             pass
         resultado.cross_refs = xrefs or resultado.cross_refs
+
+    def _extrair_gtin(self, resultado: PecaResultado) -> None:
+        """Extrai o GTIN/EAN do artigo por várias estratégias (reforçado)."""
+        page = self._page
+        candidatos: list[str] = []
+
+        # 1) th[scope='row'] / th com rótulo GTIN/EAN e td irmão
+        try:
+            for th in page.locator(
+                "th[scope='row'], part-detail-v2-summary-table th"
+            ):
+                rotulo = self._norm(th.inner_text())
+                if any(rotulo.startswith(r) for r in
+                       ("gtin", "ean", "código de barra", "codigo de barra")):
+                    td = th.locator("xpath=following-sibling::td[1]")
+                    if td.count():
+                        candidatos.append(td.first.inner_text())
+        except Exception:
+            pass
+
+        # 2) elemento de rótulo com "GTIN"/"EAN" e o próximo irmão
+        try:
+            for sel in ("dt", "label", ".label", "th"):
+                for el in page.locator(sel):
+                    try:
+                        texto = el.inner_text()
+                    except Exception:
+                        continue
+                    if not texto:
+                        continue
+                    rotulo = self._norm(texto)
+                    if not any(rotulo.startswith(r) for r in
+                               ("gtin", "ean")):
+                        continue
+                    try:
+                        irmao = el.locator(
+                            "xpath=following-sibling::*[1]").first
+                        if irmao.count():
+                            candidatos.append(irmao.inner_text())
+                    except Exception:
+                        pass
+                    try:
+                        pai = el.locator("xpath=..").first
+                        if pai.count():
+                            valor = pai.locator(
+                                "td, .p-component, div").all_inner_texts()
+                            if valor:
+                                candidatos.extend(valor)
+                    except Exception:
+                        pass
+                    break
+                if candidatos:
+                    break
+        except Exception:
+            pass
+
+        # 3) atributos / itemprop
+        try:
+            for atr in ("itemprop", "data-gtin", "data-ean"):
+                for el in page.locator(f"[{atr}]"):
+                    v = el.get_attribute(atr) or ""
+                    rotulo = self._norm(v)
+                    if rotulo.startswith("gtin") or rotulo in ("ean", "gtin13"):
+                        try:
+                            pai = el.locator("xpath=..").first
+                            if pai.count():
+                                candidatos.append(pai.inner_text())
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # 4) fallback: número "parecido com GTIN" no texto do corpo
+        if not candidatos:
+            try:
+                todos = page.inner_text("body")
+                match = re.search(
+                    r"GTIN[:\s]*([0-9]{8,14})", todos, re.IGNORECASE)
+                if match:
+                    candidatos.append(match.group(1))
+            except Exception:
+                pass
+
+        melhor = ""
+        for raw in candidatos:
+            digitos = re.sub(r"[^0-9]", "", (raw or "").strip())
+            # GTIN usual: 8, 12, 13 ou 14 dígitos
+            if len(digitos) in (8, 12, 13, 14) and digitos != melhor:
+                melhor = digitos
+                break
+        if melhor:
+            resultado.gtin = melhor
+            self._msg(f"[{resultado.codigo}] GTIN: {melhor}")
 
     def _extrair_aplicacoes(self, resultado: PecaResultado) -> None:
         """Percorre todas as marcas do seletor "Número OE" e mescla os códigos.
@@ -1754,23 +1900,40 @@ class TecDocAutomator:
             )
 
     def _extrair_veiculos(self, resultado: PecaResultado) -> None:
-        """Resolve as aplicações (veículos) do artigo via API JSON-RPC.
+        """Resolve as aplicações (veículos) do artigo via API JSON-RPC e DOM.
 
-        Ao abrir o detalhe, o site dispara ``getArticleLinkedAllLinkingTarget4``
-        (pontos de ligação por marca) e nós capturamos os pares
-        (articleLinkId, linkingTargetId). Para transformar esses IDs em nomes
-        legíveis, o SPA usa ``getArticleLinkedAllLinkingTargetsByIds3`` — o
-        servidor limita em 25 pares por chamada, então resolvemos em lotes
-        reusando a URL/headers de uma chamada real do próprio site.
+        Tenta primeiro via API (getArticleLinkedAllLinkingTargetsByIds3).
+        Se não tiver dados da API, tenta extrair de modais/tabelas no DOM
+        (estilo da extensão Chrome).
         """
+        page = self._page
+        
+        # 1) Tenta via API JSON-RPC
+        if self._link4_pares and self._link4_origem:
+            veiculos_api = self._extrair_veiculos_api(resultado)
+            if veiculos_api:
+                resultado.aplicacoes = veiculos_api
+                self._msg(f"[{resultado.codigo}] veículos (API): "
+                          f"{len(veiculos_api)} aplicação(ões)")
+                return
+        
+        # 2) Fallback: extrai de modais/tabelas no DOM (estilo extensão)
+        veiculos_dom = self._extrair_veiculos_dom()
+        if veiculos_dom:
+            resultado.aplicacoes = veiculos_dom
+            self._msg(f"[{resultado.codigo}] veículos (DOM): "
+                      f"{len(veiculos_dom)} aplicação(ões)")
+
+    def _extrair_veiculos_api(self, resultado: PecaResultado) -> list[str]:
+        """Extrai veículos via API JSON-RPC."""
         if not self._link4_pares or not self._link4_origem:
-            return
+            return []
         page = self._page
         origem = self._link4_origem
         pedido = origem.get("pedido", {}) or {}
         artigo_id = pedido.get("articleId")
         if not artigo_id:
-            return
+            return []
         par_base = {
             "provider": pedido.get("provider", 23365),
             "lang": pedido.get("lang", "pt"),
@@ -1829,13 +1992,76 @@ class TecDocAutomator:
                             continue
                         if nome not in veiculos:
                             veiculos.append(nome)
-            resultado.aplicacoes = veiculos
-            self._msg(f"[{resultado.codigo}] veículos: "
-                      f"{len(veiculos)} aplicação(ões)")
+            return veiculos
         except Exception as exc:
             self._rastro_abrir(
-                f"[{resultado.codigo}] veículos não disponíveis: {exc!r}"
+                f"[{resultado.codigo}] veículos API não disponíveis: {exc!r}"
             )
+            return []
+
+    def _extrair_veiculos_dom(self) -> list[str]:
+        """Extrai aplicações de modais/tabelas no DOM (estilo extensão Chrome).
+        
+        Procura por:
+        1. Modal/dialog com tabela de aplicações
+        2. Tabelas com colunas de veículo/ano
+        3. Lista de aplicações em qualquer lugar da página
+        """
+        page = self._page
+        veiculos: list[str] = []
+        
+        try:
+            # Procura modal/dialog
+            modal = page.locator('[role="dialog"], .modal, [class*="modal"]').first
+            if modal.count() == 0:
+                # Se não tem modal, tenta extrair de tabelas na página
+                modal = page.locator('body')
+            
+            # Extrai linhas da tabela
+            rows = modal.locator('table tbody tr')
+            seen = set()
+            
+            for i in range(rows.count()):
+                row = rows.nth(i)
+                try:
+                    # Procura link (nome do veículo)
+                    link = row.locator('a').first
+                    if link.count() == 0:
+                        continue
+                    
+                    model_raw = link.inner_text(timeout=1000).strip()
+                    if not model_raw or 'mais informações' in model_raw.lower():
+                        continue
+                    
+                    # Extrai ano
+                    cells = row.locator('td, th')
+                    year_range = ''
+                    for j in range(cells.count()):
+                        cell_text = cells.nth(j).inner_text(timeout=500).strip()
+                        year_match = re.search(r'(\d{2}\.\d{4})(?:\s*[—-]\s*(\d{2}\.\d{4}))?', cell_text)
+                        if year_match:
+                            start_year = year_match.group(1).split('.')[1]
+                            end_year = year_match.group(2).split('.')[1] if year_match.group(2) else ''
+                            year_range = f"{start_year}-{end_year}" if end_year else f"{start_year}-"
+                            break
+                    
+                    if not year_range:
+                        continue
+                    
+                    # Formata aplicação
+                    app_line = f"{model_raw} {year_range}"
+                    if app_line not in seen:
+                        seen.add(app_line)
+                        veiculos.append(app_line)
+                        
+                except Exception:
+                    continue
+            
+            return veiculos
+            
+        except Exception as exc:
+            self._rastro_abrir(f"veículos DOM não disponíveis: {exc!r}")
+            return []
 
     def __del__(self):
         try:
@@ -1958,6 +2184,8 @@ def executar_busca(
     on_progress: callable | None = None,
     on_mensagem: callable | None = None,
     capturar_api: bool = False,
+    on_pausa: callable | None = None,
+    on_resultado: callable | None = None,
 ) -> list[PecaResultado]:
     automator = TecDocAutomator(login, senha, headless=headless, marcas=marcas,
                                 capturar_api=capturar_api, on_mensagem=on_mensagem)
@@ -1978,6 +2206,9 @@ def executar_busca(
                 on_progress(i, total, codigo)
             if not codigo:
                 continue
+            # Aguarda se estiver pausado
+            if on_pausa:
+                on_pausa()
             if i > 1:
                 config.pausa_entre_codigos()
             # A marca informada na própria linha tem prioridade. O filtro é
@@ -2017,6 +2248,12 @@ def executar_busca(
                     f"[{codigo}] EXCEÇÃO em buscar_codigo: {exc!r}")
                 res = PecaResultado(codigo=codigo, observacao=f"Erro: {exc}")
             resultados.append(res)
+            # Emite parcial para preview em tempo real
+            if on_resultado:
+                try:
+                    on_resultado(res)
+                except Exception:
+                    pass
     finally:
         automator.encerrar()
     return resultados

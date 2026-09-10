@@ -41,6 +41,13 @@ QPushButton#primary {
 QPushButton#primary:hover {
     background-color: #a6c8ff;
 }
+QPushButton#secondary {
+    background-color: #313244;
+    border: 1px solid #45475a;
+}
+QPushButton#secondary:hover {
+    background-color: #45475a;
+}
 QPushButton#danger {
     background-color: #f38ba8;
     color: #11111b;
@@ -59,7 +66,7 @@ QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox {
     selection-background-color: #89b4fa;
     selection-color: #11111b;
 }
-QLineEdit:focus, QPlainTextEdit:focus {
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {
     border-color: #89b4fa;
 }
 

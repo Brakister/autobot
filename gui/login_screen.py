@@ -36,11 +36,13 @@ class LoginScreen(QWidget):
 
         self.login_edit = QLineEdit()
         self.login_edit.setPlaceholderText("Usuário / e-mail")
+        self.login_edit.returnPressed.connect(self._focar_senha)
         form.addWidget(self.login_edit)
 
         self.senha_edit = QLineEdit()
         self.senha_edit.setPlaceholderText("Senha")
         self.senha_edit.setEchoMode(QLineEdit.Password)
+        self.senha_edit.returnPressed.connect(self._validar)
         form.addWidget(self.senha_edit)
 
         self.headless_check = QCheckBox(
@@ -75,6 +77,9 @@ class LoginScreen(QWidget):
         usuario = db.get_config("tecdoc_usuario")
         if usuario:
             self.login_edit.setText(usuario)
+
+    def _focar_senha(self):
+        self.senha_edit.setFocus()
 
     def _validar(self):
         usuario = self.login_edit.text().strip()

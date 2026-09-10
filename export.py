@@ -1,4 +1,4 @@
-"""Exportação dos resultados para CSV e Excel (XLSX)."""
+"""Exportação dos resultados para CSV, Excel (XLSX/XLS) e TXT."""
 from pathlib import Path
 import csv
 
@@ -7,6 +7,12 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 import config
+
+try:
+    import xlwt
+    _TEM_XLWT = True
+except ImportError:
+    _TEM_XLWT = False
 
 
 def _linhas_planilha(resultados: list[dict]) -> list[list]:
@@ -25,7 +31,6 @@ def _linhas_planilha(resultados: list[dict]) -> list[list]:
             r.get("descricao", ""),
             r.get("marca", ""),
             r.get("gtin", ""),
-            ", ".join(r.get("cilindradas", [])),
             "\n".join(r.get("aplicacoes", [])),
             ", ".join(r.get("codigos_aplicacao", [])),
             r.get("fornecedor", ""),
@@ -37,7 +42,7 @@ def _linhas_planilha(resultados: list[dict]) -> list[list]:
 
 
 _HEADERS = [
-    "Codigo", "Descricao", "Marca", "GTIN", "Cilindradas", "Aplicacoes",
+    "Codigo", "Descricao", "Marca", "GTIN", "Aplicacoes",
     "CodigosAplicacao", "Fornecedor",
     "Disponivel", "Observacao", "CrossRefs",
 ]
@@ -81,4 +86,41 @@ def exportar_xlsx(resultados: list[dict], caminho: str | Path | None = None) -> 
         ws.column_dimensions[get_column_letter(c)].width = 28
 
     wb.save(caminho)
+    return str(caminho)
+
+
+def exportar_xls(resultados: list[dict], caminho: str | Path | None = None) -> str:
+    """Exporta para XLS (Excel 97-2003). Retorna o caminho gerado."""
+    if not _TEM_XLWT:
+        raise RuntimeError(
+            "xlwt não instalado. Rode: pip install xlwt"
+        )
+    caminho = caminho or config.EXPORT_DIR / "resultados.xls"
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = xlwt.Workbook(encoding="utf-8")
+    ws = wb.add_sheet("Resultados")
+
+    fonte = xlwt.Font()
+    fonte.bold = True
+    fonte.colour_index = 9  # branco
+    padrao = xlwt.Pattern()
+    padrao.pattern = xlwt.Pattern.SOLID_PATTERN
+    padrao.pattern_fore_colour = 0x17  # azul escuro aprox.
+    estilo_cab = xlwt.easyxf("font: bold on", ) 
+    estilo_cab.font = fonte
+    estilo_cab.pattern = padrao
+
+    for c, nome in enumerate(_HEADERS):
+        ws.write(0, c, nome, estilo_cab)
+    for i, linha in enumerate(_linhas_planilha(resultados), start=1):
+        for c, valor in enumerate(linha):
+            ws.write(i, c, str(valor))
+
+    # largura aproximada das colunas
+    for c in range(1, len(_HEADERS) + 1):
+        ws.col(c).width = 256 * 28
+
+    wb.save(str(caminho))
     return str(caminho)

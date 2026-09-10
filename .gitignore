@@ -9,12 +9,23 @@ env/
 # PyInstaller
 build/
 dist/
+_internal/
 *.spec.orig
+cadastroauto.exe
+
+# Navegador do Playwright (pode ter ~1 GB; o build.bat gera/copia)
+chromium-*/
+chromium_headless_shell-*/
+ms-playwright/
 
 # Dados gerados (não versionar)
 data/
 resultados.csv
 resultados.xlsx
+resultados.xls
+resultados.txt
+fichas.txt
+coddealgumacoisa.txt
 *.log
 
 # Segredos / credenciais (nunca subir)
