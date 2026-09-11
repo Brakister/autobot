@@ -795,7 +795,12 @@ class TecDocAutomator:
         if not self._esta_no_login():
             return  # sessão salva ainda válida
 
+        # Tenta o login automático; se não completou, dá uma segunda chance
+        # (a página Okta pode ter demorado a assentar o formulário).
         self._fazer_login()
+        if self._esta_no_login():
+            self._page.wait_for_timeout(2500)
+            self._fazer_login()
         if self._esta_no_login():
             self._aguardar_fora_do_login(on_mensagem=self._msg)
 
@@ -810,24 +815,44 @@ class TecDocAutomator:
         """
         page = self._page
 
-        # Passo 1: usuário
-        if page.locator(SELETORES["login"]["campo_usuario"]).count() > 0:
+        # O Okta primeiro resolve o device fingerprint e só então renderiza o
+        # formulário. Espera a página assentar antes de procurar os campos;
+        # preencher no meio do carregamento falhava o login automático.
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=10_000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1200)
+
+        # Passo 1: usuário (com pequeno retry — o campo pode aparecer logo
+        # depois do fingerprint).
+        for _tent in range(2):
+            campo_user = page.locator(SELETORES["login"]["campo_usuario"])
             try:
-                localizar(page, "login", "campo_usuario").first.fill(self.login)
-                localizar(page, "login", "btn_primeiro").first.click()
-                try:
-                    page.wait_for_load_state("networkidle", timeout=20_000)
-                except TimeoutError:
-                    pass
-                page.wait_for_timeout(600)
+                if campo_user.count() > 0 and campo_user.first.is_visible():
+                    campo_user.first.fill(self.login)
+                    localizar(page, "login", "btn_primeiro").first.click()
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=20_000)
+                    except TimeoutError:
+                        pass
+                    page.wait_for_timeout(800)
+                    break
             except Exception:
                 pass
+            page.wait_for_timeout(1500)
 
         # Passo 2: senha (se aparecer)
         campo_senha = page.locator(SELETORES["login"]["campo_senha"]).first
         if campo_senha.count() > 0:
-            campo_senha.fill(self.senha)
-            localizar(page, "login", "btn_senha").first.click()
+            for _tent in range(2):
+                try:
+                    if campo_senha.is_visible():
+                        campo_senha.fill(self.senha)
+                        localizar(page, "login", "btn_senha").first.click()
+                        break
+                except Exception:
+                    page.wait_for_timeout(1200)
             try:
                 page.wait_for_load_state("networkidle", timeout=20_000)
             except TimeoutError:
@@ -941,6 +966,42 @@ class TecDocAutomator:
                         return
             page.wait_for_timeout(300)
 
+    def _grid_ja_tem_marcas(self, max_linhas: int = 60) -> bool:
+        """True se TODAS as linhas visíveis da grid já são das marcas alvo.
+
+        Atalho ANTES de aplicar o filtro no site: quando o código tem só 1
+        resultado (ou todos os resultados já são da marca desejada), abrir o
+        multiselect e clicar checkbox é desnecessário — e era justamente onde
+        o fluxo ficava preso com 'as vezes o click não vai'. Se ninguém além
+        das marcas alvo aparece na grid, o resultado pode ser usado direto
+        (equivale a um filtro já efetivado).
+        """
+        page = self._page
+        try:
+            linhas = page.locator(
+                ".ag-row[row-id], table tbody tr, .article-row, .result-row")
+            n = linhas.count()
+        except Exception:
+            return False
+        if n == 0:
+            return False
+        for i in range(min(n, max_linhas)):
+            try:
+                texto = linhas.nth(i).inner_text(timeout=1_000)
+                marca = self._cel_texto(
+                    linhas.nth(i), "resultado", "cel_marca", texto)
+            except Exception:
+                texto = ""
+                marca = ""
+            if not self._marca_bate(marca):
+                # O seletor às vezes lê a célula errada (articleNo no lugar do
+                # nome) — confere pelo texto completo da linha antes de
+                # considerar "precisa aplicar filtro".
+                if texto and self._marca_no_texto(texto):
+                    continue
+                return False
+        return True
+
     def _aplicar_filtros_marca(self) -> None:
         """Seleciona as marcas no filtro nativo do site (só 1x por execução).
 
@@ -955,6 +1016,9 @@ class TecDocAutomator:
         if not self.marcas or self._filtro_aplicado:
             return
         self._filtro_aplicado = True
+        # Orçamento global: o site nem sempre confirma o filtro rápido, mas a
+        # aplicação NUNCA pode ficar presa aqui (caso real de 89s+ travado).
+        deadline = time.time() + 45.0
         page = self._page
         try:
             sel = page.locator(SELETORES["filtros"]["marca_selector"])
@@ -973,6 +1037,10 @@ class TecDocAutomator:
             # input escondido; preencher eles = "não digita a marca")
             if campo.count() > 0:
                 for marca in self.marcas:
+                    if time.time() > deadline:
+                        self._msg("Filtro: tempo limite atingido durante a "
+                                  "seleção das marcas.")
+                        break
                     # Garante que o painel e o campo estão abertos. Se o painel
                     # fechou (ex.: marca anterior não encontrada), reabre.
                     try:
@@ -1017,16 +1085,8 @@ class TecDocAutomator:
                         page.keyboard.press("Escape")
                         page.wait_for_timeout(200)
                         continue
-                    try:
-                        box = opcao.locator(SELETORES["filtros"]["check"]).first
-                        if box.count() > 0:
-                            box.click()
-                        else:
-                            opcao.click()
-                        page.wait_for_timeout(150)
+                    if self._marcar_opcao(opcao, marca):
                         escolhidas.append(marca)
-                    except Exception:
-                        pass
             else:
                 # sem campo: procura por aria-label nas opções já renderizadas
                 alvo_map = {self._norm(m): m for m in self.marcas}
@@ -1038,22 +1098,20 @@ class TecDocAutomator:
                     except Exception:
                         continue
                     if a in alvo_map:
-                        try:
-                            b = opcoes.nth(i).locator(
-                                SELETORES["filtros"]["check"]).first
-                            b.click()
+                        if self._marcar_opcao(opcoes.nth(i), alvo_map[a]):
                             escolhidas.append(alvo_map[a])
-                            page.wait_for_timeout(150)
-                        except Exception:
-                            pass
 
             # O TecDoc atualiza a URL de forma assíncrona depois do checkbox.
             # Aguarda essa confirmação antes de fechar o overlay e ler a grid.
             if escolhidas:
-                for _ in range(40):
+                # O site atualiza a URL de forma assíncrona (às vezes leva
+                # mais de 6s) — espera até ~16s, respeitando o orçamento.
+                for _ in range(80):
+                    if time.time() > deadline:
+                        break
                     if "brands=" in page.url:
                         break
-                    page.wait_for_timeout(150)
+                    page.wait_for_timeout(200)
             page.keyboard.press("Escape")
             page.wait_for_timeout(300)
             if escolhidas:
@@ -1076,31 +1134,29 @@ class TecDocAutomator:
                 reiniciado = False
                 try:
                     sel.first.click()
-                    campo.first.refresh() if campo.count() else None
+                    if campo.count():
+                        try:
+                            campo.first.refresh()
+                        except Exception:
+                            pass
                     for marca in list(escolhidas):
                         opcao = self._achar_opcao_marca(marca)
                         if opcao is None:
                             continue
-                        marcado = False
                         try:
-                            estado = self._check_marcado(opcao)
-                            marcado = estado
+                            marcado = self._check_marcado(opcao)
                         except Exception:
-                            pass
+                            marcado = False
                         if not marcado:
-                            box = opcao.locator(
-                                SELETORES["filtros"]["check"]).first
-                            try:
-                                if box.count() > 0:
-                                    box.click(force=True)
-                                else:
-                                    opcao.click(force=True)
+                            if self._marcar_opcao(opcao, marca):
                                 reiniciado = True
-                                page.wait_for_timeout(150)
-                            except Exception:
-                                pass
+                            else:
+                                self._msg(f"Filtro (retry): '{marca}' continuou "
+                                          f"desmarcada após tentativas.")
                     if reiniciado:
-                        for _ in range(30):
+                        for _ in range(50):
+                            if time.time() > deadline:
+                                break
                             if "brands=" in page.url:
                                 break
                             page.wait_for_timeout(200)
@@ -1120,19 +1176,103 @@ class TecDocAutomator:
 
     @staticmethod
     def _check_marcado(opcao) -> bool:
-        """Descobre se o checkbox da opção está marcado.
+        """Descobre se a opção da marca está marcada no multiselect.
 
-        O p-checkbox do PrimeNG pinta o .p-checkbox-box com a classe `p-highlight`
-        (ou `.p-checkbox-checked` no layout antigo) quando selecionado.
+        O p-checkbox do PrimeNG pinta o .p-checkbox-box com a classe
+        `p-highlight` (ou `.p-checkbox-checked` no layout antigo) quando
+        selecionado. Alguns layouts marcam a PRÓPRIA linha (li) com
+        `p-highlight` ou o atributo `aria-checked`. Verifica as três fontes.
         """
         try:
             box = opcao.locator(SELETORES["filtros"]["check"]).first
-            if box.count() == 0:
-                return False
-            cls = box.get_attribute("class") or ""
-            return "p-highlight" in cls or "p-checkbox-checked" in cls
+            if box.count() > 0:
+                cls = box.get_attribute("class") or ""
+                if "p-highlight" in cls or "p-checkbox-checked" in cls:
+                    return True
+        except Exception:
+            pass
+        try:
+            if "p-highlight" in (opcao.get_attribute("class") or ""):
+                return True
+        except Exception:
+            pass
+        try:
+            aria = (opcao.get_attribute("aria-checked") or "").lower()
+            return aria in ("true", "1", "selected")
         except Exception:
             return False
+
+    def _marcar_opcao(self, opcao, marca: str) -> bool:
+        """Marca a opção da marca no multiselect, tentando em ordem.
+
+        Retorna True se a opção FICOU marcada (confirmado pelo estado real
+        no DOM, não só pelo clique). Logga cada estratégia usada — assim o
+        rastro mostra se o "click foi dado" ou se o "Enter" resolveu. É o
+        feedback que faltava quando o filtro 'às vezes não vai'.
+        """
+        page = self._page
+        tentativas = 0
+
+        # 1) clique no checkbox (forma normal)
+        try:
+            box = opcao.locator(SELETORES["filtros"]["check"]).first
+            if box.count() > 0:
+                tentativas += 1
+                box.click()
+                page.wait_for_timeout(200)
+                if self._check_marcado(opcao):
+                    self._msg(f"Filtro: '{marca}' selecionada (click checkbox)")
+                    return True
+        except Exception:
+            pass
+        # 2) clique no checkbox com force (ignore o intercept)
+        try:
+            box = opcao.locator(SELETORES["filtros"]["check"]).first
+            if box.count() > 0:
+                tentativas += 1
+                box.click(force=True)
+                page.wait_for_timeout(200)
+                if self._check_marcado(opcao):
+                    self._msg(f"Filtro: '{marca}' selecionada (force checkbox)")
+                    return True
+        except Exception:
+            pass
+        # 3) clique na própria linha da opção
+        try:
+            tentativas += 1
+            opcao.click(force=True)
+            page.wait_for_timeout(200)
+            if self._check_marcado(opcao):
+                self._msg(f"Filtro: '{marca}' selecionada (click na linha)")
+                return True
+        except Exception:
+            pass
+        # 4) Enter na opção focada
+        try:
+            tentativas += 1
+            opcao.focus()
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(200)
+            if self._check_marcado(opcao):
+                self._msg(f"Filtro: '{marca}' selecionada (Enter)")
+                return True
+        except Exception:
+            pass
+        # 5) Espaço na opção focada
+        try:
+            tentativas += 1
+            opcao.focus()
+            page.keyboard.press("Space")
+            page.wait_for_timeout(200)
+            if self._check_marcado(opcao):
+                self._msg(f"Filtro: '{marca}' selecionada (Space)")
+                return True
+        except Exception:
+            pass
+
+        self._msg(f"Filtro: '{marca}' NÃO marcou após "
+                  f"{tentativas} tentativa(s) — estado não confirmou.")
+        return False
 
     @staticmethod
     def _norm(txt: str) -> str:
@@ -1184,7 +1324,11 @@ class TecDocAutomator:
         self._msg("Página de login detectada — tentando recuperar a sessão...")
         self._fazer_login()
         if self._esta_no_login():
-            ok = self._aguardar_fora_do_login(timeout_s=90.0, on_mensagem=self._msg)
+            self._page.wait_for_timeout(2500)
+            self._fazer_login()
+        if self._esta_no_login():
+            ok = self._aguardar_fora_do_login(
+                timeout_s=120.0, on_mensagem=self._msg)
             if not ok:
                 raise RuntimeError(
                     "Não foi possível sair da tela de login. "
@@ -1313,11 +1457,22 @@ class TecDocAutomator:
             tem_brands = "brands=" in url_atual
             self._filtro_efetivado = tem_brands
             if not tem_brands:
-                self._filtro_aplicado = False  # permite reaplicar no site
-                self._aplicar_filtros_marca()
-                # Espera dinâmica: para quando a grid mostrar a(s) marca(s)
-                # selecionada(s) — nada de networkidle cego + timeout de 45s.
-                self._aguardar_grid_filtrada(tempo_max_s=8.0)
+                if not self._grid_ja_tem_marcas():
+                    # Filtro não está ativo na URL e a grid mostra outras
+                    # marcas: precisa aplicar de verdade.
+                    self._filtro_aplicado = False  # permite reaplicar no site
+                    self._aplicar_filtros_marca()
+                    # Espera dinâmica: para quando a grid mostrar a(s) marca(s)
+                    # selecionada(s) — nada de networkidle cego + timeout de 45s.
+                    self._aguardar_grid_filtrada(tempo_max_s=8.0)
+                else:
+                    # Atalho: resultado único / todos da marca alvo. Aplicar o
+                    # filtro do site não muda nada e é aí que o fluxo travava.
+                    self._filtro_efetivado = True
+                    self._filtro_aplicado = True
+                    self._rastro_abrir(
+                        f"[{codigo}] grid já contém apenas a(s) marca(s) "
+                        f"alvo — filtro do site pulado.")
             else:
                 self._rastro_abrir(
                     f"[{codigo}] filtro de marcas já ativo na URL")
@@ -1460,7 +1615,10 @@ class TecDocAutomator:
         # ordem: o primeiro candidato é exatamente o primeiro resultado
         # visível que o usuário espera abrir.
         idx_linha, melhor = candidatas[0]
-        resultado.descricao = melhor.descricao
+        if self._descricao_valida(melhor.descricao):
+            resultado.descricao = melhor.descricao
+        # else: a leitura da grid pegou cabeçalho/célula errada (ex.: 'N° OE'),
+        # mantém a descrição que a API e o detalhe já preencheram
         # O seletor de marca às vezes lê a célula errada (articleNo no lugar
         # do nome da marca — ex. 'P569' em vez de 'HEPU'). Com o filtro
         # efetivo, a grid só contém a(s) marca(s) escolhida(s), então o valor
@@ -1538,6 +1696,35 @@ class TecDocAutomator:
                    for p in palavras):
                 return b
         return ""
+
+    @staticmethod
+    def _descricao_valida(texto: str) -> bool:
+        """True se o texto é uma descrição de artigo de verdade.
+
+        A leitura de célula da grid às vezes cai em cabeçalhos ('N° OE',
+        'Marca', 'Estado') ou no número do artigo ('P569', 'TM7134') quando o
+        layout renderiza só a 1ª linha. Uma descrição real tem palavras em
+        caixa mista (ex.: 'Filtro de óleo'); código/cabeçalho é CAIXA ALTA ou
+        token único sem vogal.
+        """
+        t = (texto or "").strip().rstrip(".:-")
+        if not t or len(t) < 3:
+            return False
+        cab = {
+            "n° oe", "nº oe", "numero oe", "número oe", "no oe",
+            "descricao", "descrição", "codigo", "código", "marca",
+            "artigo", "estado", "disponibilidade", "quantidade", "qtd",
+        }
+        if t.lower().strip() in cab:
+            return False
+        # token único sem nenhuma vogal = código (P569, TM7134), não descrição
+        if len(t.split()) == 1:
+            if not any(ch.lower() in "aeiouáéíóúãõâêîôûàèìòù" for ch in t):
+                return False
+        # cabeçalho/nome de coluna em caixa alta vazou como fallback
+        if t.isupper():
+            return False
+        return True
 
     @staticmethod
     def _cel_texto(linha, etapa, campo, fallback_texto: str) -> str:
