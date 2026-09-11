@@ -40,6 +40,7 @@ class PreviewDialog(QDialog):
 class ProgressScreen(QWidget):
     pausado = Signal()
     continuar = Signal()
+    editar_parciais = Signal()
 
     def __init__(self):
         super().__init__()
@@ -76,6 +77,15 @@ class ProgressScreen(QWidget):
         # Botões pause/continue e preview
         btn_layout = QHBoxLayout()
         btn_layout.addStretch(1)
+        self.btn_editar = QPushButton("Revisar já coletado…")
+        self.btn_editar.setObjectName("secondary")
+        self.btn_editar.setToolTip(
+            "Pausa a busca e abre a tela de revisão com o que já foi "
+            "coletado, para editar e salvar sem perder progresso."
+        )
+        self.btn_editar.clicked.connect(self._pedir_edicao)
+        btn_layout.addWidget(self.btn_editar)
+
         self.btn_pause = QPushButton("Pausar")
         self.btn_pause.setObjectName("secondary")
         self.btn_pause.clicked.connect(self._toggle_pause)
@@ -108,6 +118,12 @@ class ProgressScreen(QWidget):
             self.continuar.emit()
         self.btn_pause.style().unpolish(self.btn_pause)
         self.btn_pause.style().polish(self.btn_pause)
+
+    def _pedir_edicao(self):
+        """Pausa (se preciso) e avisa a MainWindow para abrir a revisão."""
+        if not self._pausado:
+            self._toggle_pause()  # emite pausado → thread para
+        self.editar_parciais.emit()
 
     def esta_pausado(self) -> bool:
         return self._pausado
@@ -181,6 +197,14 @@ class ProgressScreen(QWidget):
         self.progress.setRange(0, total)
         self.progress.setValue(0)
         self.log.clear()
+        self._pausado = False
+        self.btn_pause.setText("Pausar")
+        self.btn_pause.setObjectName("secondary")
+        self.btn_pause.style().unpolish(self.btn_pause)
+        self.btn_pause.style().polish(self.btn_pause)
+
+    def continuar_em_andamento(self):
+        """Volta do estado pausado para 'em andamento' (sem emitir sinal)."""
         self._pausado = False
         self.btn_pause.setText("Pausar")
         self.btn_pause.setObjectName("secondary")

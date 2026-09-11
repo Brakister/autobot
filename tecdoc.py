@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 import json
+import random
 import re
 import time
 import unicodedata
@@ -277,6 +278,92 @@ class BuscaNaoIniciadaError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# AUTO-REPARO: heurísticas de erros transientes (rede/cache/servidor)
+# ---------------------------------------------------------------------------
+
+_PADRAO_TRANSIENTE = (
+    # Playwright / chromium (net::ERR_*)
+    "net::err_", "err_connection", "err_internet_disconnected",
+    "err_name_not_resolved", "err_timed_out", "err_aborted",
+    "err_connection_reset", "err_connection_refused",
+    # mensagens comuns de rede
+    "connection reset", "connection refused", "connection closed",
+    "network is unreachable", "host unreachable", "socket",
+    "timed out", "timeout exceeded", "target closed", "crash",
+    "aborted", "load failed", "fetch failed", "reset by peer",
+    # erros de servidor/gateway
+    "502 bad gateway", "503 service unavailable", "504 gateway timeout",
+    "500 internal server error", "http 500", "http 502", "http 503",
+    "server error", "gateway", "upstream",
+)
+
+
+def _eh_erro_transiente(exc: BaseException) -> bool:
+    """True se a mensagem da exceção parece queda de rede/erro de servidor."""
+    if isinstance(exc, BuscaNaoIniciadaError):
+        return True
+    texto = f"{type(exc).__name__}: {exc}".lower()
+    return any(p in texto for p in _PADRAO_TRANSIENTE)
+
+
+def _resultado_tem_falha_transiente(res) -> bool:
+    """True se o resultado (já retornado) indica falha recuperável.
+
+    Como `buscar_codigo` catura algumas exceções e devolve PecaResultado com
+    observacao, esta função olha para a observacao e para a URL atual:
+    timeout, rede, servidor 5xx ou página de login/catalogo quebrada.
+    """
+    obs = f"{res.observacao or ''}".lower()
+    if any(p in obs for p in _PADRAO_TRANSIENTE):
+        return True
+    if "nenhum resultado" in obs or "nada nas marcas" in obs:
+        return False
+    if "erro" in obs:
+        return True
+    return False
+
+
+def _norm_texto(txt: str) -> str:
+    """Normaliza texto p/ comparação: minúsculas, sem acentos/trema, espaços.
+
+    Idêntico ao TecDocAutomator._norm, mas em nível de módulo para ser
+    reutilizado também no _ParserApi (filtro de marcas da resposta JSON).
+    Ex.: 'Lemförder' -> 'lemforder', 'HEPU GmbH' -> 'hepu GmbH'.
+    """
+    s = (txt or "").lower()
+    s = "".join(
+        c for c in unicodedata.normalize("NFD", s)
+        if unicodedata.category(c) != "Mn"
+    )
+    return " ".join(s.split())
+
+
+def _marca_casa(marca_lida: str, marcas: list[str]) -> bool:
+    """Comparação tolerante marca lida x marcas selecionadas (não exata).
+
+    Casa por nome exato, por prefixo de palavra, por palavra inteira e até
+    por marca dentro do texto (ex.: 'febi' em 'FEBI BILSTEIN', 'hepu' em
+    'HEPU GmbH'). Usada no DOM (grid) e na resposta da API, que podem trazer
+    a marca com sufixo/acento/case diferentes do que o usuário digitou — o
+    match exato fazia 'HEPU' ser rejeitado e virar 'produto não encontrado'.
+    """
+    if not marca_lida:
+        return False
+    m = _norm_texto(marca_lida)
+    for b in marcas:
+        b = _norm_texto(b)
+        if not b:
+            continue
+        if m == b or m.startswith(b + " ") or b in m:
+            return True
+        # palavra-a-palavra (ex.: 'skf' em 'abc skf xyz')
+        for palavra in m.split():
+            if palavra == b or (len(b) >= 2 and palavra.startswith(b)):
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # AUXILIARES de extração de JSON (recursivo, tolerante a estrutura)
 # ---------------------------------------------------------------------------
 
@@ -352,6 +439,9 @@ class TecDocAutomator:
         self._mensagens = []
         self._filtro_aplicado = False
         self._filtro_efetivado = False  # brands= apareceu na URL real do site
+        # URL da busca cacheada enquanto ainda tem groups= (a SPA esvazia
+        # esse parâmetro ao abrir o detalhe, quebrando a navegação direta).
+        self._url_ultima_busca = ""
 
     def _msg(self, texto: str) -> None:
         self._mensagens.append(texto)
@@ -402,6 +492,85 @@ class TecDocAutomator:
                 self._pw.stop()
         except Exception:
             pass
+
+    # -- auto-reparo ---------------------------------------------------------
+
+    def _reconectar(self) -> None:
+        """Reinicia o navegador (após queda de rede/erro de servidor).
+
+        Encerra a instância atual com salvamento de sessão e sobe tudo de novo
+        (browser, contexto com a sessão salva, página, interceptação de API e
+        login garantido). Seguro para chamar mesmo se o Playwright já caiu:
+        tudo dentro de try/except.
+        """
+        self._msg("Rede/servidor com problema — tentando religar o navegador...")
+        # 1) salva o que der e derruba o Playwright antigo
+        try:
+            self.encerrar()
+        except Exception:
+            pass
+        self._pw = None
+        self._context = None
+        self._page = None
+        # 2) sobe tudo de novo (reusa a sessão salva)
+        self._pw = sync_playwright().start()
+        browser = self._pw.chromium.launch(headless=self.headless)
+        self._context = browser.new_context(
+            storage_state=str(config.SESSION_FILE)
+            if config.SESSION_FILE.exists() else None,
+        )
+        if self._arquivo_sessionstorage().exists():
+            self._restaurar_sessionstorage()
+        self._page = self._context.new_page()
+        self._page.set_default_timeout(config.PLAYWRIGHT_TIMEOUT)
+        self._rastrear_navegacoes()
+        if self.capturar_api:
+            self._configurar_interceptacao()
+        else:
+            self._registrar_interceptacao()
+        # 3) garante login; se MFA, espera o usuário terminar no navegador
+        self.garantir_login()
+        self._filtro_aplicado = False
+        self._filtro_efetivado = False
+        self._url_ultima_busca = ""
+        self._msg("Navegador religado com sucesso.")
+
+    def _buscar_com_reconexao(self, codigo: str) -> "PecaResultado":
+        """buscar_codigo com auto-reparo: tenta de novo ante quedas de rede.
+
+        Se o erro for transitório (queda de rede, timeout, 5xx), chama
+        _reconectar() e refaz a busca, até config.TENTATIVAS_POR_CODIGO.
+        Erros não transitórios estouram imediatamente.
+        """
+        for tentativa in range(1, config.TENTATIVAS_POR_CODIGO + 1):
+            try:
+                res = self.buscar_codigo(codigo)
+            except Exception as exc:
+                if not _eh_erro_transiente(exc) or \
+                        tentativa >= config.TENTATIVAS_POR_CODIGO:
+                    raise
+                self._msg(
+                    f"[{codigo}] erro transitório (tentativa "
+                    f"{tentativa}/{config.TENTATIVAS_POR_CODIGO}): {exc!r}")
+                time.sleep(random.uniform(*config.PAUSA_ENTRE_TENTATIVAS))
+                try:
+                    self._reconectar()
+                except Exception as exc2:
+                    self._msg(f"[{codigo}] falha ao religar navegador: {exc2!r}")
+                continue
+            if not _resultado_tem_falha_transiente(res):
+                return res
+            if tentativa >= config.TENTATIVAS_POR_CODIGO:
+                return res
+            self._msg(
+                f"[{codigo}] resultado com falha transitória "
+                f"({tentativa}/{config.TENTATIVAS_POR_CODIGO}), repetindo…")
+            time.sleep(random.uniform(*config.PAUSA_ENTRE_TENTATIVAS))
+            try:
+                self._reconectar()
+            except Exception as exc2:
+                self._msg(f"[{codigo}] falha ao religar navegador: {exc2!r}")
+        return res  # pragma: no cover (loop sempre retorna/levanta acima)
 
     # -- persistência de sessão (cookies + localStorage + sessionStorage) ---
 
@@ -973,12 +1142,7 @@ class TecDocAutomator:
         digitada sem o umlaut (ex.: 'lemforder') casa com a opção do site
         ('LEMFÖRDER'), evitando o 'às vezes vai, às vezes não'.
         """
-        s = (txt or "").lower()
-        s = "".join(
-            c for c in unicodedata.normalize("NFD", s)
-            if unicodedata.category(c) != "Mn"
-        )
-        return " ".join(s.split())
+        return _norm_texto(txt)
 
     def _achar_opcao_marca(self, marca: str):
         """Espera a opção com a marca aparecer no painel (via aria-label).
@@ -1136,37 +1300,57 @@ class TecDocAutomator:
         self._aguardar_grid_estavel()
         self._rastro_abrir(f"[{codigo}] grid carregou")
 
-        # aplica o filtro de marcas do próprio site (1x por execução) — DESATIVADO
-        # por padrão: aplicar o filtro fazia o SITE recarregar sozinho pra /
-        # (catalog-not-found -> Okta). Sem o filtro a gente escolhe a linha
-        # pela marca e abre o artigo direto pela URL (comprovado no diagnóst.
-        if (not self._filtro_aplicado
-                and _APLICAR_FILTRO_MARCAS_SITE):
-            self._aplicar_filtros_marca()
-            # Espera dinâmica: para quando a grid mostrar a(s) marca(s)
-            # selecionada(s) — nada de networkidle cego + timeout de 45s.
-            self._aguardar_grid_filtrada(tempo_max_s=8.0)
+        # Re-checa se o filtro de marcas está ativo na URL real do site.
+        # IMPORTANTE: o site perde o brands= a cada nova busca, então o
+        # filtro precisa ser REAPLICADO (e _filtro_efetivado recalibrado),
+        # senão a validação de marca fica bypassada e abre artigo errado
+        # ("artigo não encontrado" a partir do 2º código).
+        if _APLICAR_FILTRO_MARCAS_SITE and self.marcas:
+            try:
+                url_atual = page.url.lower()
+            except Exception:
+                url_atual = ""
+            tem_brands = "brands=" in url_atual
+            self._filtro_efetivado = tem_brands
+            if not tem_brands:
+                self._filtro_aplicado = False  # permite reaplicar no site
+                self._aplicar_filtros_marca()
+                # Espera dinâmica: para quando a grid mostrar a(s) marca(s)
+                # selecionada(s) — nada de networkidle cego + timeout de 45s.
+                self._aguardar_grid_filtrada(tempo_max_s=8.0)
+            else:
+                self._rastro_abrir(
+                    f"[{codigo}] filtro de marcas já ativo na URL")
+
+        # Cachea a URL da busca AGORA, enquanto ainda tem groups= e brands=.
+        # Ao abrir o detalhe a SPA reescreve a URL (o groups= some) e a
+        # navegação direta montaria a URL do artigo com groups=1 (default),
+        # que o site às vezes trata como "artigo não encontrado".
+        try:
+            self._url_ultima_busca = page.url
+        except Exception:
+            self._url_ultima_busca = ""
 
         # ---- 1) API + detalhe DOM ------------------------------------------
         parser = _ParserApi(resultado, self.marcas)
         ok = parser.extrair(self._ultima_resposta_direct_search)
-        if (ok and resultado.observacao.startswith((
-                "Nenhum resultado", "Nada nas marcas"))):
+        if (ok and resultado.observacao.startswith(("Nenhum resultado",))):
             self._msg(f"[{codigo}] sem resultado; seguindo para o próximo.")
             return resultado
-        if ok and not parser.tenha_dados_faltando:
-            # A API identifica os candidatos, mas os dados que a extensão
-            # antiga extraía (GTIN, OE e aplicações) só existem no detalhe.
-            # Portanto, não encerra aqui: abre a linha correta enquanto a
-            # página ainda está viva.
-            self._rastro_abrir(f"[{codigo}] API encontrou candidatos; abrindo detalhe")
-            linhas = page.locator(".ag-row[row-id], table tbody tr, "
-                                 ".article-row, .result-row")
-            if linhas.count() > 0:
-                self._extrair_dom(resultado)
+        if ok and not resultado.observacao.startswith(("Nada nas marcas",)):
+            if not parser.tenha_dados_faltando:
+                # A API identifica os candidatos, mas os dados que a extensão
+                # antiga extraía (GTIN, OE e aplicações) só existem no detalhe.
+                # Portanto, não encerra aqui: abre a linha correta enquanto a
+                # página ainda está viva.
+                self._rastro_abrir(f"[{codigo}] API encontrou candidatos; abrindo detalhe")
+                linhas = page.locator(".ag-row[row-id], table tbody tr, "
+                                      ".article-row, .result-row")
+                if linhas.count() > 0:
+                    self._extrair_dom(resultado)
+                    return resultado
+                self._enriquecer_xref(resultado)
                 return resultado
-            self._enriquecer_xref(resultado)
-            return resultado
 
         # ---- 2) fallback DOM ------------------------------------------------
         self._rastro_abrir(f"[{codigo}] vai pro caminho DOM")
@@ -1242,8 +1426,19 @@ class TecDocAutomator:
                     ilegiveis += 1
                     continue
             if self.marcas and not self._marca_bate(marca):
-                if not self._filtro_efetivado:
-                    continue
+                if self._filtro_efetivado:
+                    pass
+                else:
+                    # Seletor de marca falhou/leu célula errada (rastro mostra
+                    # 'marca=1-GNC'). A marca escolhida costuma aparecer no
+                    # texto inteiro da linha — procura palavra normalizada.
+                    texto_explorado = " ".join(
+                        p.strip() for p in texto_linha.splitlines() if p.strip()
+                    )
+                    if texto_explorado and self._marca_no_texto(texto_explorado):
+                        marca = self._marca_candidata_no_texto(texto_explorado)
+                    else:
+                        continue
             peca = PecaResultado(codigo=resultado.codigo, marca=marca)
             peca.descricao = self._cel_texto(linha, "resultado",
                                              "cel_descricao", texto_linha)
@@ -1266,10 +1461,18 @@ class TecDocAutomator:
         # visível que o usuário espera abrir.
         idx_linha, melhor = candidatas[0]
         resultado.descricao = melhor.descricao
-        resultado.marca = melhor.marca
+        # O seletor de marca às vezes lê a célula errada (articleNo no lugar
+        # do nome da marca — ex. 'P569' em vez de 'HEPU'). Com o filtro
+        # efetivo, a grid só contém a(s) marca(s) escolhida(s), então o valor
+        # da célula pode ser ignorado: usa self.marcas[0].
+        if (self._filtro_efetivado and self.marcas
+                and not self._marca_bate(melhor.marca)):
+            resultado.marca = self.marcas[0]
+        else:
+            resultado.marca = melhor.marca
         resultado.disponivel = melhor.disponivel
         marca_confirmada = (
-            not self.marcas or self._marca_bate(melhor.marca)
+            not self.marcas or self._marca_bate(resultado.marca)
         )
         if (self._filtro_aplicado and not self._filtro_efetivado
                 and not marca_confirmada and not resultado.observacao):
@@ -1300,20 +1503,41 @@ class TecDocAutomator:
         'febi' casa com 'febi bilstein' (startswith por palavra). A confirmação
         final é o sumário da página do artigo.
         """
-        if not marca:
+        return _marca_casa(marca, self.marcas)
+
+    def _marca_no_texto(self, texto: str) -> bool:
+        """True se alguma marca selecionada aparece como palavra no texto.
+
+        Fallback quando a coluna de marca da AG-Grid é lida com o seletor
+        errado (rastro: 'marca=1-GNC'). Normaliza o texto e procura a marca
+        por palavra inteira ou prefixo de palavra (mesma semântica do
+        _marca_bate, agora contra o texto completo da linha).
+        """
+        if not texto or not self.marcas:
             return False
-        m = " ".join(marca.strip().lower().split())
+        norm = _norm_texto(texto)
+        palavras = [p for p in norm.split() if p]
         for b in self.marcas:
-            b = " ".join(b.strip().lower().split())
+            b = _norm_texto(b)
             if not b:
                 continue
-            if m == b or m.startswith(b + " ") or b in m:
-                return True
-            # também casa palavra-a-palavra (ex.: marca 'skf' em 'abc skf xyz')
-            for palavra in m.split():
-                if palavra == b or (len(b) >= 2 and palavra.startswith(b)):
+            for palavra in palavras:
+                if b in palavra or (len(b) >= 2 and palavra.startswith(b)):
                     return True
         return False
+
+    def _marca_candidata_no_texto(self, texto: str) -> str:
+        """Devolve a marca selecionada que confirma no texto da linha."""
+        norm = _norm_texto(texto)
+        palavras = [p for p in norm.split() if p]
+        for b in self.marcas:
+            b_norm = _norm_texto(b)
+            if not b_norm:
+                continue
+            if any(b_norm in p or (len(b_norm) >= 2 and p.startswith(b_norm))
+                   for p in palavras):
+                return b
+        return ""
 
     @staticmethod
     def _cel_texto(linha, etapa, campo, fallback_texto: str) -> str:
@@ -1488,7 +1712,10 @@ class TecDocAutomator:
             return False
 
         try:
-            url_atual = page.url
+            # SPA às vezes esvazia/reescreve a URL (groups= some) entre a busca e
+            # abertura do detalhe. Usa a URL capturada no fim da busca; se
+            # estiver vazia (ex.: retry pós-reconexão), cai pra page.url.
+            url_atual = self._url_ultima_busca or page.url
             p = urllib.parse.urlsplit(url_atual)
             params = urllib.parse.parse_qs(p.query)
             # O row-id identifica o artigo exibido: [brandId]-[articleNo].
@@ -1514,7 +1741,12 @@ class TecDocAutomator:
                 except Exception:
                     brand_id = ""
             query = params.get("query", [resultado.codigo])[0]
-            groups = params.get("groups", ["1"])[0]
+            groups = params.get("groups", [""])[0]
+            # Na busca com vários resultados o site NÃO informa groups na
+            # URL. O valor default "1" causa o detalhe a abrir vazio/errado.
+            # Sem groups real, monta URL sem o parâmetro — o site resolve
+            # o artigo por brandId + articleNo direto.
+            tem_groups = bool(groups) and groups != "1"
             if not brand_id:
                 self._msg("Detalhe direto: sem brandId na URL (filtro não "
                           "refletiu).")
@@ -1522,10 +1754,12 @@ class TecDocAutomator:
 
             novo_caminho = f"/tecdoc/pt/parts/{brand_id}/{article_no}/detail"
             nova_url = (f"{p.scheme}://{p.netloc}{novo_caminho}"
-                        f"?query={urllib.parse.quote(query)}&numberType=1"
-                        f"&groups={urllib.parse.quote(groups)}")
-            nova_url += self._fragmento_detalhe(url_atual, brand_id,
-                                                article_no, query, groups)
+                        f"?query={urllib.parse.quote(query)}&numberType=1")
+            if tem_groups:
+                nova_url += f"&groups={urllib.parse.quote(groups)}"
+            nova_url += self._fragmento_detalhe(
+                url_atual, brand_id, article_no, query,
+                groups if tem_groups else "")
             # se a própria célula expõe o href do artigo, usa ELE (fonte da
             # verdade do site); o montado acima é o fallback
             if href_artigo:
@@ -1577,6 +1811,8 @@ class TecDocAutomator:
 
         Copia a parte de busca do fragmento atual (mantém a codificação do
         título) e acrescenta o segmento /detail:... com os parâmetros.
+        `groups` vazio significa que a busca não tinha grupo definido (caso
+        dos múltiplos resultados) — omite o ;groups: também no fragmento.
         """
         try:
             fr = urllib.parse.urlsplit(url_atual).fragment
@@ -1587,16 +1823,19 @@ class TecDocAutomator:
             # raiz = "@brc/search:...;query:..."
             idx = fr.find(";query:")
             raiz = fr[:idx] if idx != -1 else fr
-            return ("#" + raiz
-                    + ";query:" + urllib.parse.quote(str(query))
-                    + ";groups:" + urllib.parse.quote(str(groups))
-                    + ";brands:" + str(brand_id)
-                    + "/detail:" + str(article)
-                    + ";brandId:" + str(brand_id)
-                    + ";articleNo:" + str(article)
-                    + ";query:" + urllib.parse.quote(str(query))
-                    + ";numberType:1"
-                    + ";groups:" + urllib.parse.quote(str(groups)))
+            saida = ("#" + raiz
+                     + ";query:" + urllib.parse.quote(str(query))
+                     + ";brands:" + str(brand_id))
+            if groups:
+                saida += ";groups:" + urllib.parse.quote(str(groups))
+            saida += ("/detail:" + str(article)
+                      + ";brandId:" + str(brand_id)
+                      + ";articleNo:" + str(article)
+                      + ";query:" + urllib.parse.quote(str(query))
+                      + ";numberType:1")
+            if groups:
+                saida += ";groups:" + urllib.parse.quote(str(groups))
+            return saida
         except Exception:
             return ""
 
@@ -2149,10 +2388,11 @@ class _ParserApi:
             self.tenha_dados_faltando = True
             return True
 
-        # filtra por marcas
+        # filtra por marcas (comparação tolerante, ex.: 'hepu' casa com a
+        # API que pode vir como 'HEPU GmbH' / case diferente)
         if self.marcas:
             filtrados = [a for a in artigos
-                         if a["marca"] in self.marcas]
+                         if _marca_casa(a["marca"], self.marcas)]
             if not filtrados:
                 self.resultado.observacao = (
                     f"Nada nas marcas: {', '.join(self.marcas)}"
@@ -2161,8 +2401,9 @@ class _ParserApi:
                 return True
             artigos = filtrados
             # prioriza a ordem das marcas configuradas
-            artigos.sort(key=lambda a: self.marcas.index(a["marca"])
-                         if a["marca"] in self.marcas else 99)
+            artigos.sort(key=lambda a: min(
+                (i for i, m in enumerate(self.marcas)
+                 if _marca_casa(a["marca"], [m])), default=99))
 
         melhor = artigos[0]
         self.resultado.marca = melhor["marca"]
@@ -2275,7 +2516,7 @@ def executar_busca(
                 automator._filtro_aplicado = True
                 automator._filtro_efetivado = True
             try:
-                res = automator.buscar_codigo(codigo)
+                res = automator._buscar_com_reconexao(codigo)
             except Exception as exc:
                 automator._rastro_abrir(
                     f"[{codigo}] EXCEÇÃO em buscar_codigo: {exc!r}")

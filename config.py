@@ -49,8 +49,13 @@ def pausa_entre_codigos() -> None:
 DEFAULT_BRANDS = [
     "Brembo", "Bosch", "Mahle", "Bilstein", "Febi", "SWAG", "ZE",
     "TRW", "Lemförder", "Sachs", "Textar", "Hengst", "Hella",
-    "Delphi", "Pierburg", "UFI",
+    "Delphi", "Pierburg", "UFI", "HEPU",
 ]
 
 # Limite de códigos por corrida automática (evita timeout)
 MAX_CODES_PER_RUN = 500
+
+# Auto-reparo: quantas tentativas por código ante queda de rede / erro de
+# servidor, e a pausa (aleatória) entre tentativas, em segundos.
+TENTATIVAS_POR_CODIGO = 3
+PAUSA_ENTRE_TENTATIVAS = (5.0, 12.0)

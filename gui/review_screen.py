@@ -141,16 +141,25 @@ class EditarItemDialog(QDialog):
 
 class ReviewScreen(QWidget):
     def __init__(self, resultados: list[dict], on_confirmar,
-                 on_adicionar=None, on_salvar_e_voltar=None):
+                 on_adicionar=None, on_salvar_e_voltar=None,
+                 modo="final", on_encerrar=None):
         """resultados: lista de dicts (cada um com codigo, descricao, marca,
         fornecedor, disponivel, observacao, cross_refs).
         on_confirmar: callback(lista_final) chamado ao confirmar.
-        on_salvar_e_voltar: callback(resultados) chamado ao salvar parcial e voltar."""
+        on_salvar_e_voltar: callback(resultados) chamado ao salvar parcial e voltar.
+        modo='parcial': tela chamada no MEIO de uma busca pausada.
+            - botão principal vira "Salvar e continuar busca"
+            - "Salvar parcial e voltar" vira "Encerrar automação e salvar agora"
+            - botão "+ Adicionar códigos" é ocultado.
+        on_encerrar: callback(resultados) quando modo='parcial' e o usuário
+            clica em "Encerrar automação e salvar agora"."""
         super().__init__()
         self.resultados = resultados
         self.on_confirmar = on_confirmar
         self.on_adicionar = on_adicionar
         self.on_salvar_e_voltar = on_salvar_e_voltar
+        self.on_encerrar = on_encerrar
+        self.modo = modo
         self._build()
         self._popular()
 
@@ -167,16 +176,23 @@ class ReviewScreen(QWidget):
         root.setContentsMargins(30, 30, 30, 30)
         root.setSpacing(12)
 
-        titulo = QLabel("Está tudo certo?")
+        if self.modo == "parcial":
+            titulo = QLabel("Revisando o que já foi coletado")
+            sub = QLabel(
+                "A busca está pausada. Revise/edite os resultados já "
+                "coletados. Use 'Salvar e continuar' para retomar a busca "
+                "com o que salvou, ou 'Encerrar' para parar e salvar agora."
+            )
+        else:
+            titulo = QLabel("Está tudo certo?")
+            sub = QLabel(
+                "Revise os resultados abaixo. Você pode editar qualquer campo, "
+                "marcar/desmarcar disponível e remover linhas antes de confirmar."
+            )
         titulo.setObjectName("title")
-        root.addWidget(titulo)
-
-        sub = QLabel(
-            "Revise os resultados abaixo. Você pode editar qualquer campo, "
-            "marcar/desmarcar disponível e remover linhas antes de confirmar."
-        )
         sub.setObjectName("subtitle")
         sub.setWordWrap(True)
+        root.addWidget(titulo)
         root.addWidget(sub)
 
         self.tabela = QTableWidget(0, 6)
@@ -248,16 +264,25 @@ class ReviewScreen(QWidget):
         btn_linha = QHBoxLayout()
         btn_adicionar = QPushButton("+ Adicionar códigos")
         btn_adicionar.clicked.connect(self._adicionar)
+        if self.modo == "parcial":
+            btn_adicionar.setVisible(False)
         btn_linha.addWidget(btn_adicionar)
-        btn_salvar_voltar = QPushButton("Salvar parcial e voltar")
-        btn_salvar_voltar.setObjectName("secondary")
+        btn_salvar_voltar = QPushButton(
+            "Encerrar automação e salvar agora"
+            if self.modo == "parcial" else "Salvar parcial e voltar"
+        )
+        btn_salvar_voltar.setObjectName("danger" if self.modo == "parcial"
+                                       else "secondary")
         btn_salvar_voltar.clicked.connect(self._salvar_e_voltar)
         btn_preview = QPushButton("Preview .txt")
         btn_preview.setObjectName("secondary")
         btn_preview.clicked.connect(self._preview_txt)
         btn_linha.addWidget(btn_preview)
         btn_linha.addStretch(1)
-        self.btn_confirmar = QPushButton("Confirmar e salvar ✓")
+        self.btn_confirmar = QPushButton(
+            "Salvar e continuar busca"
+            if self.modo == "parcial" else "Confirmar e salvar ✓"
+        )
         self.btn_confirmar.setObjectName("primary")
         self.btn_confirmar.clicked.connect(self._confirmar)
         btn_linha.addWidget(self.btn_confirmar)
@@ -579,6 +604,14 @@ class ReviewScreen(QWidget):
         finais = self._linhas_finais()
         if not finais:
             QMessageBox.warning(self, "Nada a salvar", "Não há linhas para salvar.")
+            return
+        if self.modo == "parcial":
+            if self.on_encerrar:
+                self.on_encerrar(finais)
+                return
+            QMessageBox.information(
+                self, "Não é possível continuar",
+                "Modo de retomada não disponível. Feche a busca para salvar.")
             return
         if self.on_salvar_e_voltar:
             self.on_salvar_e_voltar(finais)
