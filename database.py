@@ -15,6 +15,17 @@ from pathlib import Path
 import config
 
 
+def _limpar_codigo(txt) -> str:
+    """Remove todo whitespace (espaços/tabs/quebras) de um código."""
+    if not txt:
+        return ""
+    return "".join(str(txt).split())
+
+
+# ---------------------------------------------------------------------------
+# schema
+# ---------------------------------------------------------------------------
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(config.DATABASE_PATH)
     conn.row_factory = sqlite3.Row
@@ -67,6 +78,32 @@ def init_db() -> None:
             conn.execute("ALTER TABLE pecas ADD COLUMN aplicacoes TEXT")
         if "codigos_aplicacao" not in colunas:
             conn.execute("ALTER TABLE pecas ADD COLUMN codigos_aplicacao TEXT")
+
+        # limpeza de dados: códigos coletados do site às vezes vêm com espaços
+        # internos (ex.: '038 121 011 B'); normaliza removendo todo whitespace.
+        for row in conn.execute(
+            "SELECT id, codigo_ref FROM cross_references "
+            "WHERE codigo_ref LIKE '% %' OR codigo_ref LIKE char(9) || '%'"
+        ).fetchall():
+            limpo = _limpar_codigo(row["codigo_ref"])
+            if limpo != row["codigo_ref"]:
+                conn.execute(
+                    "UPDATE cross_references SET codigo_ref = ? WHERE id = ?",
+                    (limpo, row["id"]),
+                )
+        for row in conn.execute(
+            "SELECT id, codigos_aplicacao FROM pecas "
+            "WHERE codigos_aplicacao LIKE '% %'"
+        ).fetchall():
+            try:
+                lista = json.loads(row["codigos_aplicacao"])
+            except Exception:
+                continue
+            limpos = [_limpar_codigo(c) for c in lista]
+            conn.execute(
+                "UPDATE pecas SET codigos_aplicacao = ? WHERE id = ?",
+                (json.dumps(limpos, ensure_ascii=False), row["id"]),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +165,11 @@ def salvar_peca(
     codigos_aplicacao: list[str] | None = None,
 ) -> None:
     """Insere (ou atualiza) uma peça e suas cross-references."""
+    codigo = _limpar_codigo(codigo)
+    if cross_refs:
+        cross_refs = [(_limpar_codigo(r), m) for r, m in cross_refs]
+    if codigos_aplicacao:
+        codigos_aplicacao = [_limpar_codigo(c) for c in codigos_aplicacao]
     with _connect() as conn:
         conn.execute(
                 """INSERT INTO pecas

@@ -338,6 +338,20 @@ def _norm_texto(txt: str) -> str:
     return " ".join(s.split())
 
 
+def _limpar_codigo(txt) -> str:
+    """Remove toda ocorrência de espaço/whitespace de um código lido do site.
+
+    O TecDoc renderiza os números de artigo/OE agrupados por legibilidade
+    (ex.: '038 121 011 B', 'J9C 19939', '13 51 7 584 461'); o código real do
+    catálogo não tem espaços ('038121011B', 'J9C19939', '13517584461').
+    Também remove quebras de linha/tabulação que eventualmente entram nos
+    textos lidos do DOM.
+    """
+    if not txt:
+        return ""
+    return "".join(str(txt).split())
+
+
 def _marca_casa(marca_lida: str, marcas: list[str]) -> bool:
     """Comparação tolerante marca lida x marcas selecionadas (não exata).
 
@@ -1517,8 +1531,8 @@ class TecDocAutomator:
         xrefs: list[tuple[str, str | None]] = []
         for corpo in self._ultimas_respostas_detalhe:
             for item in _todos_caminhos(corpo, ("articleNumber", "articleNo")):
-                if isinstance(item, str) and item and \
-                        item.upper() != resultado.codigo.upper():
+                item = _limpar_codigo(item)
+                if item and item.upper() != resultado.codigo.upper():
                     marca = _caminho(corpo, CAMPO_MARCA)
                     xrefs.append((item, marca if isinstance(marca, str) else None))
         resultado.cross_refs = xrefs or resultado.cross_refs
@@ -1892,6 +1906,7 @@ class TecDocAutomator:
                 anc = cel.locator("a").first
                 if anc.count() > 0:
                     href_artigo = (anc.get_attribute("href") or "").strip()
+            article_no = _limpar_codigo(article_no)
         except Exception:
             pass
         if not article_no and not href_artigo:
@@ -2139,6 +2154,7 @@ class TecDocAutomator:
                 except Exception:
                     pass
                 if cod:
+                    cod = _limpar_codigo(cod)
                     info = info or None
                     if not any(ex_cod == cod for ex_cod, _ in xrefs):
                         xrefs.append((cod, info))
@@ -2341,7 +2357,7 @@ class TecDocAutomator:
                     cels = tabela.locator("tbody tr td:first-child")
                     for j in range(cels.count()):
                         try:
-                            cod = cels.nth(j).inner_text().strip()
+                            cod = _limpar_codigo(cels.nth(j).inner_text())
                         except Exception:
                             continue
                         if cod and self._norm(cod) not in juntar:
@@ -2566,7 +2582,7 @@ class _ParserApi:
             artigos.append({
                 "marca": _caminho(a, CAMPO_MARCA) or "",
                 "descricao": _caminho(a, CAMPO_DESCRICAO) or "",
-                "codigo_ref": _caminho(a, ("articleNumber", "articleNo")) or "",
+                "codigo_ref": _limpar_codigo(_caminho(a, ("articleNumber", "articleNo")) or ""),
                 "disponivel": _eh_disponivel(a),
             })
 
