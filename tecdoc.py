@@ -306,7 +306,10 @@ _PADRAO_TRANSIENTE = (
     # mensagens comuns de rede
     "connection reset", "connection refused", "connection closed",
     "network is unreachable", "host unreachable", "socket",
-    "timed out", "timeout exceeded", "target closed", "crash",
+    "timed out", "timeout exceeded", "target closed", "targetclosed",
+    "has been closed", "was closed", "is closed",
+    "page closed", "pageclosed", "browser closed", "browserclosed",
+    "context closed", "contextclosed", "crash",
     "aborted", "load failed", "fetch failed", "reset by peer",
     # erros de servidor/gateway
     "502 bad gateway", "503 service unavailable", "504 gateway timeout",
@@ -808,13 +811,20 @@ class TecDocAutomator:
     # -- login ---------------------------------------------------------------
 
     def _esta_no_login(self) -> bool:
-        """True se a página atual ainda está na tela de login (Okta ou do app)."""
+        """True se a página atual ainda está na tela de login (Okta ou do app).
+
+        Inclui o post-logout do TecDoc (…/pt/post-logout): a sessão caiu e o
+        catálogo não está carregado, então vale religar o login antes de
+        procurar o campo de busca.
+        """
         try:
             if self._page.locator(SELETORES["login"]["detector"]).count() > 0:
                 return True
             url = self._page.url
             return ("/login" in url or "login.tecalliance" in url
-                    or "oauth2" in url)
+                    or "oauth2" in url
+                    or "post-logout" in url or "logout" in url
+                    or "logoff" in url)
         except Exception:
             return True
 
@@ -978,7 +988,7 @@ class TecDocAutomator:
             primeiro = ""
             if n:
                 try:
-                    primeiro = linha.first.inner_text()[:60]
+                    primeiro = linha.first.inner_text(timeout=800)[:60]
                 except Exception:
                     pass
             if n == 0:
@@ -1193,7 +1203,8 @@ class TecDocAutomator:
                 for i in range(opcoes.count()):
                     try:
                         a = self._norm(
-                            opcoes.nth(i).get_attribute("aria-label") or "")
+                            opcoes.nth(i).get_attribute(
+                                "aria-label", timeout=800) or "")
                     except Exception:
                         continue
                     if a in alvo_map:
@@ -1298,13 +1309,14 @@ class TecDocAutomator:
         # PrimeNG atual (como o da tela do usuário) expõe o estado no input
         # escondido. Ler este estado antes das classes visuais é importante:
         # a classe pode demorar um frame para ser atualizada ao voltar de
-        # segundo plano.
+# segundo plano.
         try:
             inp = opcao.locator(SELETORES["filtros"]["check_input"]).first
             if inp.count() > 0:
-                if inp.is_checked():
+                if inp.is_checked(timeout=800):
                     return True
-                aria_input = (inp.get_attribute("aria-checked") or "").lower()
+                aria_input = (inp.get_attribute(
+                    "aria-checked", timeout=800) or "").lower()
                 if aria_input in ("true", "1", "selected"):
                     return True
         except Exception:
@@ -1312,18 +1324,20 @@ class TecDocAutomator:
         try:
             box = opcao.locator(SELETORES["filtros"]["check"]).first
             if box.count() > 0:
-                cls = box.get_attribute("class") or ""
+                cls = box.get_attribute("class", timeout=800) or ""
                 if "p-highlight" in cls or "p-checkbox-checked" in cls:
                     return True
         except Exception:
             pass
         try:
-            if "p-highlight" in (opcao.get_attribute("class") or ""):
+            if "p-highlight" in (opcao.get_attribute(
+                    "class", timeout=800) or ""):
                 return True
         except Exception:
             pass
         try:
-            aria = (opcao.get_attribute("aria-checked") or "").lower()
+            aria = (opcao.get_attribute(
+                "aria-checked", timeout=800) or "").lower()
             return aria in ("true", "1", "selected")
         except Exception:
             return False
@@ -1437,7 +1451,7 @@ class TecDocAutomator:
         um clique perdido deixe a execução parada no overlay.
         """
         try:
-            brand_id = (opcao.get_attribute("ta-value") or "").strip()
+            brand_id = (opcao.get_attribute("ta-value", timeout=800) or "").strip()
             if not brand_id or not brand_id.isdigit():
                 return False
             return self._aplicar_marca_id_pela_url(brand_id, marca)
@@ -1510,7 +1524,8 @@ class TecDocAutomator:
             for i in range(opcoes.count()):
                 try:
                     rotulo = self._norm(
-                        opcoes.nth(i).get_attribute("aria-label") or "")
+                        opcoes.nth(i).get_attribute(
+                            "aria-label", timeout=800) or "")
                 except Exception:
                     continue
                 if rotulo == alvo or rotulo.startswith(alvo + " "):
@@ -1526,16 +1541,19 @@ class TecDocAutomator:
         """Anti-bug: nunca digita código na tela de login.
 
         Antes de qualquer busca, garante que NÃO estamos na tela de login.
-        Se estivermos, tenta recuperar; se não sair, aborta com erro claro em
-        vez de digitar o código no campo de usuário/senha (bug antigo kkk).
+        Se estivermos (login Okta, post-logout, sessão expirada), volta pra raiz
+        do catálogo e religa a sessão via garantir_login(); se não sair, aborta
+        com erro claro em vez de digitar o código no campo de usuário/senha
+        (bug antigo kkk).
         """
         if not self._esta_no_login():
             return
-        self._msg("Página de login detectada — tentando recuperar a sessão...")
-        self._fazer_login()
-        if self._esta_no_login():
-            self._page.wait_for_timeout(2500)
-            self._fazer_login()
+        self._msg("Sessão fora do catálogo — tentando recuperar o login...")
+        # Navega de novo pra raiz do catálogo: do post-logout a SPA
+        # redireciona pro Okta e o login automático roda; do Okta ainda em
+        # sessão, cai direto no catálogo. (garantir_login também aguarda o
+        # usuário concluir MFA manual se o login automático falhar.)
+        self.garantir_login()
         if self._esta_no_login():
             ok = self._aguardar_fora_do_login(
                 timeout_s=120.0, on_mensagem=self._msg)
@@ -1908,7 +1926,8 @@ class TecDocAutomator:
         except Exception:
             pass
         try:
-            row_id = linhas.nth(idx_linha).get_attribute("row-id") or ""
+            row_id = linhas.nth(idx_linha).get_attribute(
+                "row-id", timeout=800) or ""
         except Exception:
             row_id = ""
         self._rastro_abrir(
@@ -2143,18 +2162,19 @@ class TecDocAutomator:
         href_artigo = ""
         row_brand_id = ""
         try:
-            row_id = linha.get_attribute("row-id") or ""
+            row_id = linha.get_attribute("row-id", timeout=800) or ""
             match = re.search(r"\[(\d+)\]-\[(.+)\]", row_id)
             if match:
                 row_brand_id, article_no = match.groups()
             cel = linha.locator("[col-id='articleNo']").first
             if cel.count() > 0:
-                article_no = article_no or cel.inner_text().strip()
+                article_no = article_no or cel.inner_text(timeout=800).strip()
                 # o próprio site renderiza o artigo como link — o href dele é
                 # a URL CERTA (sem adivinhar nada)
                 anc = cel.locator("a").first
                 if anc.count() > 0:
-                    href_artigo = (anc.get_attribute("href") or "").strip()
+                    href_artigo = (anc.get_attribute(
+                        "href", timeout=800) or "").strip()
             article_no = _limpar_codigo(article_no)
         except Exception:
             pass
@@ -2187,7 +2207,8 @@ class TecDocAutomator:
             if not brand_id:
                 try:
                     match = re.search(r"\[(\d+)\]",
-                                      linha.get_attribute("row-id") or "")
+                                      linha.get_attribute(
+                                          "row-id", timeout=800) or "")
                     brand_id = match.group(1) if match else ""
                 except Exception:
                     brand_id = ""
@@ -2326,17 +2347,18 @@ class TecDocAutomator:
                 val = r.locator(SELETORES["detalhe"]["cel_valor"]).first
                 try:
                     if rot.count() > 0 and val.count() > 0:
-                        sumario[rot.inner_text().strip()] = val.inner_text().strip()
+                        sumario[rot.inner_text(timeout=800).strip()] = \
+                            val.inner_text(timeout=800).strip()
                 except Exception:
                     pass
             # O componente pode mudar de wrapper, mas o HTML da extensão
             # antiga permanece estável: th[scope=row] seguido por td.
             for i in range(page.locator("th[scope='row']").count()):
                 th = page.locator("th[scope='row']").nth(i)
-                rotulo = th.inner_text().strip()
+                rotulo = th.inner_text(timeout=800).strip()
                 td = th.locator("xpath=following-sibling::td[1]")
                 if td.count() > 0:
-                    sumario[rotulo] = td.inner_text().strip()
+                    sumario[rotulo] = td.inner_text(timeout=800).strip()
             marca = next((v for k, v in sumario.items()
                           if self._norm(k) == "marca"), "")
             desc = next((v for k, v in sumario.items()
@@ -2371,7 +2393,7 @@ class TecDocAutomator:
         try:
             est = page.locator(SELETORES["detalhe"]["estado"]).first
             if est.count() > 0:
-                t = est.inner_text()
+                t = est.inner_text(timeout=800)
                 m = re.search(r":\s*([^\n]+)", t)
                 val = (m.group(1).strip() if m else t.strip())
                 if val:
@@ -2389,17 +2411,20 @@ class TecDocAutomator:
             )
             for i in range(rows.count()):
                 r = rows.nth(i)
-                cod = (r.get_attribute("ta-value") or "").strip()
+                try:
+                    cod = (r.get_attribute("ta-value", timeout=800) or "").strip()
+                except Exception:
+                    cod = ""
                 if not cod:
                     try:
                         cod = r.locator(SELETORES["detalhe"]["cel_oe_codigo"]) \
-                              .first.inner_text().strip()
+                              .first.inner_text(timeout=800).strip()
                     except Exception:
                         cod = ""
                 info = ""
                 try:
                     info = r.locator(SELETORES["detalhe"]["cel_oe_info"]) \
-                           .first.inner_text().strip()
+                           .first.inner_text(timeout=800).strip()
                 except Exception:
                     pass
                 if cod:
@@ -2423,7 +2448,9 @@ class TecDocAutomator:
 
         def _texto(el, *args) -> str:
             try:
-                return (el.inner_text(*args) or "").strip()
+                # timeout padrão curto: sem isso cada leitura espera 30s se
+                # o nó destaca durante o polling do GTIN
+                return (el.inner_text(*args, timeout=800) or "").strip()
             except Exception:
                 return ""
 
@@ -2485,7 +2512,7 @@ class TecDocAutomator:
                 for atr in ("itemprop", "data-gtin", "data-ean"):
                     for el in _todos(page.locator(f"[{atr}]")):
                         try:
-                            v_attr = el.get_attribute(atr) or ""
+                            v_attr = el.get_attribute(atr, timeout=800) or ""
                         except Exception:
                             continue
                         rotulo = self._norm(v_attr)
@@ -2545,20 +2572,36 @@ class TecDocAutomator:
         cada marca como um ``li[role=option]`` (ex.: JAGUAR, LAND ROVER).
         Para cada marca disponível, clicamos nela e lemos os códigos OE (primeira
         célula de cada linha da tabela "Número OE" que contém o autocomplete).
+        O carregamento é assíncrono, então faz POLLING até as células
+        renderizarem — sem isso "alguns códigos de aplicação não vinham".
         Códigos repetidos são mesclados (deduplicados) com os já existentes.
         """
         page = self._page
         try:
-            # espera o autocomplete aparecer (pode demorar no2º código)
-            ac = page.locator("p-autocomplete:visible").first
+            # ancora na tabela "Número OE" pra não pegar outro p-autocomplete
+            # da página por engano; se ela não tiver autocomplete, cai pro
+            # primeiro visível (comportamento antigo).
+            tabela = page.locator(SELETORES["detalhe"]["lista_oe"]).first
+            # a referência ("Número OE") às vezes monta DEPOIS do sumário do
+            # artigo: espera até ~3s antes de desistir (evita ler vazio e
+            # depois travar em outra etapa sem referência).
+            for _ in range(10):
+                if (tabela.count() > 0
+                        and tabela.locator("p-autocomplete").count() > 0):
+                    break
+                page.wait_for_timeout(300)
+            if tabela.count() == 0 or \
+                    tabela.locator("p-autocomplete").count() == 0:
+                tabela = page.locator("p-autocomplete").first \
+                    .locator("xpath=ancestor::table").first
+            if tabela.count() == 0:
+                self._rastro_abrir(
+                    f"[{resultado.codigo}] referência (Número OE) não "
+                    f"disponível na página.")
+                return
+            ac = tabela.locator("p-autocomplete").first
             if ac.count() == 0:
-                for _ in range(6):
-                    page.wait_for_timeout(500)
-                    if page.locator("p-autocomplete:visible").count():
-                        break
-                ac = page.locator("p-autocomplete:visible").first
-                if ac.count() == 0:
-                    return
+                return
             botao = ac.locator("button.p-autocomplete-dropdown").first
             if botao.count() == 0:
                 return
@@ -2580,43 +2623,116 @@ class TecDocAutomator:
                 "li[role='option'][aria-label]:visible"
             )
             _abrir()
-            marcas: list[str] = []
-            for i in range(opcoes.count()):
-                nome = (opcoes.nth(i).get_attribute("aria-label") or
-                        opcoes.nth(i).inner_text()).strip()
-                if nome and self._norm(nome) not in {
-                        self._norm(m) for m in marcas}:
-                    marcas.append(nome)
+            marcas_set: dict[str, str] = {}
+            panel = ac.locator("div.p-autocomplete-panel").first
+            # coleta opções scrollando o painel até o fim: garante que marcas
+            # com dropdown virtualizado (lista longa) fiquem todas capturadas
+            for _round in range(15):
+                n_opcoes = opcoes.count()
+                for i in range(n_opcoes):
+                    try:
+                        rotulo = opcoes.nth(i).get_attribute(
+                            "aria-label", timeout=800) or ""
+                    except Exception:
+                        rotulo = ""
+                    if not rotulo:
+                        try:
+                            rotulo = opcoes.nth(i).inner_text(timeout=800)
+                        except Exception:
+                            rotulo = ""
+                    nome = (rotulo or "").strip()
+                    if nome:
+                        chave = self._norm(nome)
+                        if chave not in marcas_set:
+                            marcas_set[chave] = nome
+                if panel.count():
+                    try:
+                        antes = panel.evaluate(
+                            "el => el.scrollTop + el.clientHeight")
+                        panel.evaluate(
+                            "el => el.scrollTop = el.scrollHeight")
+                        page.wait_for_timeout(200)
+                        depois = panel.evaluate(
+                            "el => el.scrollTop + el.clientHeight")
+                        if abs(depois - antes) < 2:
+                            break
+                    except Exception:
+                        break
+                else:
+                    break
+            marcas = list(marcas_set.values())
             page.keyboard.press("Escape")
             page.wait_for_timeout(150)
 
             juntar = {self._norm(c) for c in resultado.codigos_aplicacao}
-            tabela = ac.locator("xpath=ancestor::table").first
+
+            def _ler_novos() -> list[str]:
+                cels = tabela.locator("tbody tr td:first-child")
+                novos: list[str] = []
+                for j in range(cels.count()):
+                    try:
+                        cod = _limpar_codigo(
+                            cels.nth(j).inner_text(timeout=800))
+                    except Exception:
+                        continue
+                    if cod and self._norm(cod) not in juntar:
+                        novos.append(cod)
+                return novos
+
+            # teto de tempo pra troca de abinha das marcas: mesmo que um clique
+            # não "pegue" ou a tabela demore a re-renderizar, o código não pode
+            # travar aqui (reads sem timeout usariam 30s cada).
+            deadline = time.time() + 45.0
             for marca in marcas:
+                if time.time() > deadline:
+                    self._msg("Aplicações: tempo limite atingido na troca "
+                              "das marcas.")
+                    break
                 _abrir()
                 if opcoes.count() == 0:
                     page.keyboard.press("Escape")
                     continue
-                opcao = page.locator(
-                    "li.p-autocomplete-item, li[role='option']").filter(
-                    has_text=marca).first
-                if opcao.count() == 0:
+                try:
+                    opcao = page.locator(
+                        "li.p-autocomplete-item, li[role='option']").filter(
+                        has_text=marca).first
+                    if opcao.count() == 0:
+                        page.keyboard.press("Escape")
+                        continue
+                    opcao.click(timeout=2_500)
+                except Exception:
                     page.keyboard.press("Escape")
+                    page.wait_for_timeout(150)
                     continue
-                opcao.click(timeout=2_500)
-                page.wait_for_timeout(250)
-                if tabela.count():
-                    cels = tabela.locator("tbody tr td:first-child")
-                    for j in range(cels.count()):
-                        try:
-                            cod = _limpar_codigo(cels.nth(j).inner_text())
-                        except Exception:
-                            continue
-                        if cod and self._norm(cod) not in juntar:
-                            juntar.add(self._norm(cod))
-                            resultado.codigos_aplicacao.append(cod)
+                # códigos da marca carregam async: espera a tabela renderizar
+                # (em vez de ler às cegas 250ms depois do clique).
+                novos: list[str] = []
+                for _ in range(12):  # até ~2,4s de polling
+                    if time.time() > deadline:
+                        break
+                    novos = _ler_novos()
+                    if novos:
+                        break
+                    page.wait_for_timeout(200)
+                for cod in novos:
+                    if self._norm(cod) not in juntar:
+                        juntar.add(self._norm(cod))
+                        resultado.codigos_aplicacao.append(cod)
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(150)
+            # fallback: se o dropdown de marcas não abriu/rendeu nada, ainda
+            # lê os códigos que já estão visíveis na tabela "Número OE".
+            if not resultado.codigos_aplicacao:
+                for _ in range(12):
+                    if time.time() > deadline:
+                        break
+                    novos = _ler_novos()
+                    if novos:
+                        for cod in novos:
+                            juntar.add(self._norm(cod))
+                            resultado.codigos_aplicacao.append(cod)
+                        break
+                    page.wait_for_timeout(200)
             self._msg(
                 f"[{resultado.codigo}] códigos OE mesclados: "
                 f"{len(resultado.codigos_aplicacao)} em {len(marcas)} marca(s)"
@@ -2634,7 +2750,7 @@ class TecDocAutomator:
         (estilo da extensão Chrome).
         """
         page = self._page
-        
+
         # 1) Tenta via API JSON-RPC
         if self._link4_pares and self._link4_origem:
             veiculos_api = self._extrair_veiculos_api(resultado)
@@ -2643,7 +2759,34 @@ class TecDocAutomator:
                 self._msg(f"[{resultado.codigo}] veículos (API): "
                           f"{len(veiculos_api)} aplicação(ões)")
                 return
-        
+
+        # 1-bis) link4 não veio: tenta forçar a aba de aplicações no
+        #        detalhe pra que o SPA dispare a chamada JSON-RPC
+        if not self._link4_pares:
+            try:
+                aba = page.locator(
+                    "ta-tab:has-text('Aplica'), "
+                    "button:has-text('Aplica'), "
+                    "a:has-text('Aplica'), "
+                    "[role='tab']:has-text('Aplica'), "
+                    "ta-tab:has-text('vehicle'), "
+                    "button:has-text('vehicle'), "
+                    "a:has-text('vehicle'), "
+                    "[role='tab']:has-text('vehicle')").first
+                if aba.count() > 0:
+                    aba.click(timeout=2_000)
+                    page.wait_for_timeout(1_500)
+            except Exception:
+                pass
+            if self._link4_pares and self._link4_origem:
+                veiculos_api = self._extrair_veiculos_api(resultado)
+                if veiculos_api:
+                    resultado.aplicacoes = veiculos_api
+                    self._msg(
+                        f"[{resultado.codigo}] veículos (API pós-aba): "
+                        f"{len(veiculos_api)} aplicação(ões)")
+                    return
+
         # 2) Fallback: extrai de modais/tabelas no DOM (estilo extensão)
         veiculos_dom = self._extrair_veiculos_dom()
         if veiculos_dom:
@@ -2691,20 +2834,28 @@ class TecDocAutomator:
                     }
                 }
                 r = page.evaluate(
-                    """async ({url, headers, body}) => {
+                    """async ({url, headers, body, timeoutMs}) => {
                         try {
+                            // AbortController limita o tempo do fetch: sem isso
+                            // o evaluate fica preso no timeout default de 30s
+                            // quando a API de veículos não responde.
+                            const ctrl = new AbortController();
+                            const timer = setTimeout(() => ctrl.abort(), timeoutMs);
                             const resp = await fetch(url, {
                                 method: 'POST',
                                 headers: headers,
                                 body: body,
+                                signal: ctrl.signal,
                             });
+                            clearTimeout(timer);
                             const j = await resp.json();
                             return {status: resp.status, data: j};
                         } catch (e) {
                             return {status: 0, erro: String(e)};
                         }
                     }""",
-                    {"url": url, "headers": headers, "body": json.dumps(corpo)},
+                    {"url": url, "headers": headers,
+                     "body": json.dumps(corpo), "timeoutMs": 12_000},
                 )
                 arr = (r.get("data", {}).get("data", {}).get("array", [])
                        or [])
@@ -2744,11 +2895,13 @@ class TecDocAutomator:
                 # Se não tem modal, tenta extrair de tabelas na página
                 modal = page.locator('body')
             
-            # Extrai linhas da tabela
+            # Extrai linhas da tabela (cap pra não varrer a página toda quando a
+            # referência não monta e o fallback cai no body inteiro)
             rows = modal.locator('table tbody tr')
             seen = set()
+            total_rows = min(rows.count(), 1000)
             
-            for i in range(rows.count()):
+            for i in range(total_rows):
                 row = rows.nth(i)
                 try:
                     # Procura link (nome do veículo)
