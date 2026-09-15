@@ -18,8 +18,12 @@ class BrandFilterScreen(QWidget):
 
     def _build(self):
         root = QVBoxLayout()
-        root.setContentsMargins(40, 40, 40, 40)
-        root.setSpacing(16)
+        root.setContentsMargins(52, 44, 52, 44)
+        root.setSpacing(14)
+
+        eyebrow = QLabel("ETAPA 2 DE 3 · REFINAR RESULTADOS")
+        eyebrow.setObjectName("eyebrow")
+        root.addWidget(eyebrow)
 
         titulo = QLabel("Filtrar por marcas")
         titulo.setObjectName("title")
@@ -45,6 +49,7 @@ class BrandFilterScreen(QWidget):
         self.lista = QListWidget()
         self.lista.setSelectionMode(QListWidget.MultiSelection)
         self.lista.itemSelectionChanged.connect(self._atualizar_count)
+        self.lista.setMinimumHeight(270)
         for marca in self.marcas_conhecidas:
             item = QListWidgetItem(marca)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)

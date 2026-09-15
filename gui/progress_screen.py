@@ -41,6 +41,7 @@ class ProgressScreen(QWidget):
     pausado = Signal()
     continuar = Signal()
     editar_parciais = Signal()
+    destravar_solicitado = Signal()
 
     def __init__(self):
         super().__init__()
@@ -50,8 +51,12 @@ class ProgressScreen(QWidget):
 
     def _build(self):
         root = QVBoxLayout()
-        root.setContentsMargins(40, 40, 40, 40)
-        root.setSpacing(16)
+        root.setContentsMargins(52, 44, 52, 44)
+        root.setSpacing(14)
+
+        eyebrow = QLabel("ETAPA 3 DE 3 · AUTOMAÇÃO EM ANDAMENTO")
+        eyebrow.setObjectName("eyebrow")
+        root.addWidget(eyebrow)
 
         titulo = QLabel("Buscando no TecDoc…")
         titulo.setObjectName("title")
@@ -66,7 +71,7 @@ class ProgressScreen(QWidget):
         root.addWidget(sub)
 
         self.lbl_atual = QLabel("Aguardando…")
-        self.lbl_atual.setObjectName("subtitle")
+        self.lbl_atual.setObjectName("status")
         root.addWidget(self.lbl_atual)
 
         self.progress = QProgressBar()
@@ -90,6 +95,14 @@ class ProgressScreen(QWidget):
         self.btn_pause.setObjectName("secondary")
         self.btn_pause.clicked.connect(self._toggle_pause)
         btn_layout.addWidget(self.btn_pause)
+
+        self.btn_destravar = QPushButton("Destravar")
+        self.btn_destravar.setObjectName("danger")
+        self.btn_destravar.setToolTip(
+            "Pula a tentativa travada e tenta esse código outra vez no fim do lote."
+        )
+        self.btn_destravar.clicked.connect(self._pedir_desbloqueio)
+        btn_layout.addWidget(self.btn_destravar)
         
         self.btn_preview = QPushButton("Preview parcial .txt")
         self.btn_preview.setObjectName("secondary")
@@ -124,6 +137,11 @@ class ProgressScreen(QWidget):
         if not self._pausado:
             self._toggle_pause()  # emite pausado → thread para
         self.editar_parciais.emit()
+
+    def _pedir_desbloqueio(self):
+        self.btn_destravar.setEnabled(False)
+        self.lbl_atual.setText("Destravando no próximo ponto seguro…")
+        self.destravar_solicitado.emit()
 
     def esta_pausado(self) -> bool:
         return self._pausado
@@ -198,6 +216,7 @@ class ProgressScreen(QWidget):
         self.progress.setValue(0)
         self.log.clear()
         self._pausado = False
+        self.btn_destravar.setEnabled(True)
         self.btn_pause.setText("Pausar")
         self.btn_pause.setObjectName("secondary")
         self.btn_pause.style().unpolish(self.btn_pause)
@@ -212,6 +231,7 @@ class ProgressScreen(QWidget):
         self.btn_pause.style().polish(self.btn_pause)
 
     def atualizar(self, index: int, total: int, codigo: str):
+        self.btn_destravar.setEnabled(True)
         self.progress.setValue(index)
         self.lbl_atual.setText(
             f"({index}/{total}) Buscando código: {codigo}"

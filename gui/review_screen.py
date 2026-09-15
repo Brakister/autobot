@@ -173,7 +173,7 @@ class ReviewScreen(QWidget):
 
     def _build(self):
         root = QVBoxLayout()
-        root.setContentsMargins(30, 30, 30, 30)
+        root.setContentsMargins(40, 34, 40, 34)
         root.setSpacing(12)
 
         if self.modo == "parcial":
@@ -189,9 +189,12 @@ class ReviewScreen(QWidget):
                 "Revise os resultados abaixo. Você pode editar qualquer campo, "
                 "marcar/desmarcar disponível e remover linhas antes de confirmar."
             )
+        eyebrow = QLabel("REVISÃO E EXPORTAÇÃO")
+        eyebrow.setObjectName("eyebrow")
         titulo.setObjectName("title")
         sub.setObjectName("subtitle")
         sub.setWordWrap(True)
+        root.addWidget(eyebrow)
         root.addWidget(titulo)
         root.addWidget(sub)
 

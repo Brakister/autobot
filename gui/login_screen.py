@@ -16,9 +16,14 @@ class LoginScreen(QWidget):
 
     def _build(self):
         root = QVBoxLayout()
-        root.setContentsMargins(40, 40, 40, 40)
-        root.setSpacing(16)
+        root.setContentsMargins(56, 48, 56, 48)
+        root.setSpacing(14)
         root.addStretch(1)
+
+        eyebrow = QLabel("CONSULTA E CADASTRO DE PEÇAS")
+        eyebrow.setObjectName("eyebrow")
+        eyebrow.setAlignment(Qt.AlignCenter)
+        root.addWidget(eyebrow)
 
         titulo = QLabel("Cadastro Auto · TecDoc")
         titulo.setObjectName("title")
@@ -30,7 +35,8 @@ class LoginScreen(QWidget):
         sub.setAlignment(Qt.AlignCenter)
         root.addWidget(sub)
 
-        box = QGroupBox("Credenciais")
+        box = QGroupBox("Credenciais de acesso")
+        box.setMaximumWidth(460)
         form = QVBoxLayout()
         form.setSpacing(10)
 
@@ -65,12 +71,13 @@ class LoginScreen(QWidget):
         form.addWidget(self.erro)
 
         box.setLayout(form)
-        root.addWidget(box)
+        root.addWidget(box, 0, Qt.AlignHCenter)
 
         root.addStretch(1)
         self.setLayout(root)
 
         self._preencher_salvo()
+        self.login_edit.setFocus()
 
     def _preencher_salvo(self):
         """Preenche com credenciais salvas da última vez (usuário)."""

@@ -36,6 +36,7 @@ class _BuscaThread(QThread):
         self.headless = headless
         self._pausado = False
         self._cancelar = False
+        self._destravar = False
 
     def pausar(self):
         self._pausado = True
@@ -46,6 +47,18 @@ class _BuscaThread(QThread):
     def parar(self):
         """Aborta a busca na próxima pausa (quando bloqueado aguardando)."""
         self._cancelar = True
+
+    def destravar(self):
+        """Pula a tentativa atual no próximo ponto seguro."""
+        self._destravar = True
+        self.mensagem.emit(
+            "Destravar solicitado: este código será tentado no fim da fila.")
+
+    def _consumir_desbloqueio(self):
+        if not self._destravar:
+            return False
+        self._destravar = False
+        return True
 
     def _aguardar_se_pausado(self):
         while self._pausado:
@@ -63,6 +76,7 @@ class _BuscaThread(QThread):
                 on_mensagem=lambda m: self.mensagem.emit(m),
                 on_pausa=lambda: self._aguardar_se_pausado(),
                 on_resultado=lambda r: self.resultado_parcial.emit(r.to_dict()),
+                deve_desbloquear=self._consumir_desbloqueio,
             )
             self.concluido.emit([r.to_dict() for r in resultados])
         except _AbortarBusca:
@@ -75,7 +89,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Cadastro Auto · TecDoc")
-        self.resize(1000, 720)
+        self.resize(1120, 760)
+        self.setMinimumSize(900, 640)
         self.codigos: list[str] = []
         self.codigos_sessao: list = []
         self.marcas: list[str] = []
@@ -145,6 +160,7 @@ class MainWindow(QMainWindow):
         self.progress_screen.pausado.connect(self.thread.pausar)
         self.progress_screen.continuar.connect(self.thread.continuar)
         self.progress_screen.editar_parciais.connect(self._on_editar_parciais)
+        self.progress_screen.destravar_solicitado.connect(self.thread.destravar)
         self.thread.start()
 
     def _on_progresso(self, index: int, total: int, codigo: str):

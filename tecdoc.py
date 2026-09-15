@@ -82,6 +82,13 @@ class PecaResultado:
 # overlay, pesquisa pelo role=searchbox e atualiza a URL com ?brands=.
 _APLICAR_FILTRO_MARCAS_SITE = True
 
+# IDs confirmados pelo próprio TecDoc nas rotas `brands=`. Para estas marcas,
+# não há motivo para abrir o multiselect PrimeNG (a origem dos travamentos).
+_BRAND_IDS_CONHECIDOS = {
+    "hepu": "178",
+    "textar": "39",
+}
+
 SELETORES: dict[str, dict[str, str]] = {
     # ------------------------------------------------------------------ LOGIN
     "login": {
@@ -189,6 +196,12 @@ SELETORES: dict[str, dict[str, str]] = {
             "li[role='option'], [role='option']"
         ),
         "check": ".p-checkbox-box",
+        # O quadrado visual do PrimeNG é um <div>; o input real fica dentro
+        # de `.p-hidden-accessible`. É ele que mantém o estado confiável.
+        "check_input": (
+            "input[type='checkbox'], input[role='checkbox'], "
+            ".p-hidden-accessible input"
+        ),
     },
     # ------------------------------------------------- DATA DE REFERÊNCIA
     # Página de DETALHE do artigo (chega-se clicando num resultado da AG-Grid).
@@ -275,6 +288,10 @@ def localizar(page: Page, chave_etapa: str, chave_campo: str):
 
 class BuscaNaoIniciadaError(RuntimeError):
     """A busca pelo código não chegou a ser disparada no site."""
+
+
+class BuscaDestravada(RuntimeError):
+    """O usuário pediu para pular a tentativa atual e retomá-la no fim."""
 
 
 # ---------------------------------------------------------------------------
@@ -444,13 +461,15 @@ def _todos_caminhos(obj, chaves: tuple[str, ...], limite: int = 500):
 class TecDocAutomator:
     def __init__(self, login: str, senha: str, headless: bool = False,
                  marcas: list[str] | None = None, capturar_api: bool = False,
-                 on_mensagem: callable | None = None):
+                 on_mensagem: callable | None = None,
+                 deve_desbloquear: callable | None = None):
         self.login = login
         self.senha = senha
         self.headless = headless
         self.marcas = marcas or []
         self.capturar_api = capturar_api  # salva request/response em data/captura/
         self._msg_cb = on_mensagem
+        self._deve_desbloquear = deve_desbloquear
         self._pw = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
@@ -479,6 +498,11 @@ class TecDocAutomator:
                 pass
         else:
             print(f"[cadastroauto] {texto}")
+
+    def _checar_desbloqueio(self) -> None:
+        """Interrompe a tentativa em pontos seguros quando solicitado."""
+        if self._deve_desbloquear and self._deve_desbloquear():
+            raise BuscaDestravada("Solicitação de destravar recebida")
 
     # -- contexto ------------------------------------------------------------
 
@@ -945,6 +969,7 @@ class TecDocAutomator:
         amostras: list[tuple[int, str]] = []
         contagens: list[int] = []
         while time.time() - inicio < tempo_max_s:
+            self._checar_desbloqueio()
             try:
                 linha = page.locator(SELETORES["resultado"]["linha"])
                 n = linha.count()
@@ -1066,6 +1091,23 @@ class TecDocAutomator:
         deadline = time.time() + 45.0
         page = self._page
         try:
+            self._checar_desbloqueio()
+            # Caminho sem dropdown para as marcas mais usadas neste fluxo.
+            # A rota é idêntica à que o TecDoc cria depois do checkbox.
+            ids_conhecidos = [
+                _BRAND_IDS_CONHECIDOS.get(self._norm(marca))
+                for marca in self.marcas
+            ]
+            if self.marcas and all(ids_conhecidos):
+                for marca, brand_id in zip(self.marcas, ids_conhecidos):
+                    self._checar_desbloqueio()
+                    if not self._aplicar_marca_id_pela_url(brand_id, marca):
+                        break
+                else:
+                    self._filtro_efetivado = "brands=" in page.url
+                    self._msg("Filtro de marcas aplicado diretamente pela URL "
+                              f"({', '.join(self.marcas)}).")
+                    return
             try:
                 page.bring_to_front()
             except Exception:
@@ -1073,7 +1115,8 @@ class TecDocAutomator:
             sel = page.locator(SELETORES["filtros"]["marca_selector"])
             if sel.count() == 0:
                 return
-            sel.first.click()
+            self._msg("Filtro: abrindo seletor de marcas…")
+            sel.first.click(timeout=3_000)
             campo = page.locator(SELETORES["filtros"]["filtro_texto"])
             try:
                 campo.first.wait_for(state="visible", timeout=3_000)
@@ -1086,6 +1129,7 @@ class TecDocAutomator:
             # input escondido; preencher eles = "não digita a marca")
             if campo.count() > 0:
                 for marca in self.marcas:
+                    self._checar_desbloqueio()
                     if time.time() > deadline:
                         self._msg("Filtro: tempo limite atingido durante a "
                                   "seleção das marcas.")
@@ -1099,7 +1143,7 @@ class TecDocAutomator:
                         campo_vis = False
                     if not campo_vis:
                         try:
-                            sel.first.click()
+                            sel.first.click(timeout=3_000)
                             campo.first.wait_for(state="visible",
                                                  timeout=3_000)
                         except Exception:
@@ -1110,7 +1154,7 @@ class TecDocAutomator:
                     # preenche com fill (que substitui tudo) e, se o evento de
                     # filtragem não disparar, digita char a char.
                     try:
-                        campo.first.click()
+                        campo.first.click(timeout=2_000)
                         campo.first.press("Control+A")
                         campo.first.fill(marca)
                     except Exception:
@@ -1135,6 +1179,12 @@ class TecDocAutomator:
                         page.wait_for_timeout(200)
                         continue
                     if self._marcar_opcao(opcao, marca):
+                        escolhidas.append(marca)
+                    elif self._aplicar_marca_pela_url(opcao, marca):
+                        # Plano B para o PrimeNG: ele já nos deu o ID da
+                        # marca em `ta-value`; aplicar esse ID na rota é o
+                        # mesmo estado que o checkbox produz, sem depender
+                        # de foco/click no elemento visual.
                         escolhidas.append(marca)
             else:
                 # sem campo: procura por aria-label nas opções já renderizadas
@@ -1182,7 +1232,7 @@ class TecDocAutomator:
                 self._filtro_aplicado = False
                 reiniciado = False
                 try:
-                    sel.first.click()
+                    sel.first.click(timeout=3_000)
                     for marca in list(escolhidas):
                         # O overlay pode ser recriado ao voltar de segundo
                         # plano. Refiltra para não tentar clicar na opção da
@@ -1229,6 +1279,10 @@ class TecDocAutomator:
             if escolhidas and not self._filtro_efetivado:
                 self._msg("ATENÇÃO: o filtro não refletiu na URL (?brands=). "
                           "Não vou clicar nos resultados para evitar 404.")
+        except BuscaDestravada:
+            # Não transforme o pedido do botão "Destravar" em uma falha de
+            # filtro; ele precisa subir até a fila para reagendar o código.
+            raise
         except Exception as exc:
             self._msg(f"Filtro de marcas falhou: {exc}")
 
@@ -1241,6 +1295,20 @@ class TecDocAutomator:
         selecionado. Alguns layouts marcam a PRÓPRIA linha (li) com
         `p-highlight` ou o atributo `aria-checked`. Verifica as três fontes.
         """
+        # PrimeNG atual (como o da tela do usuário) expõe o estado no input
+        # escondido. Ler este estado antes das classes visuais é importante:
+        # a classe pode demorar um frame para ser atualizada ao voltar de
+        # segundo plano.
+        try:
+            inp = opcao.locator(SELETORES["filtros"]["check_input"]).first
+            if inp.count() > 0:
+                if inp.is_checked():
+                    return True
+                aria_input = (inp.get_attribute("aria-checked") or "").lower()
+                if aria_input in ("true", "1", "selected"):
+                    return True
+        except Exception:
+            pass
         try:
             box = opcao.locator(SELETORES["filtros"]["check"]).first
             if box.count() > 0:
@@ -1271,58 +1339,86 @@ class TecDocAutomator:
         page = self._page
         tentativas = 0
 
-        # 1) clique no checkbox (forma normal)
+        def confirmou() -> bool:
+            # O site atualiza o modelo Angular assíncronamente. Em vez de
+            # decidir 200 ms depois do click (o que falhava na imagem), dá
+            # tempo e lê o input real + atributos do componente.
+            for _ in range(8):
+                if self._check_marcado(opcao):
+                    return True
+                page.wait_for_timeout(150)
+            return False
+
+        # Se a opção já ficou marcada em uma tentativa anterior/retry, não
+        # clique outra vez: multiselect é toggle e um novo click a desmarca.
+        if confirmou():
+            self._msg(f"Filtro: '{marca}' já estava selecionada.")
+            return True
+
+        # 1) Marca o INPUT de verdade. `check` é mais confiável que clicar no
+        # quadrado decorativo e o `force` é necessário porque o input é
+        # propositalmente escondido pelo PrimeNG.
+        try:
+            inp = opcao.locator(SELETORES["filtros"]["check_input"]).first
+            if inp.count() > 0:
+                tentativas += 1
+                inp.check(force=True, timeout=4_000)
+                if confirmou():
+                    self._msg(f"Filtro: '{marca}' selecionada (input real)")
+                    return True
+        except Exception:
+            pass
+
+        # 2) clique no checkbox visual (forma normal)
         try:
             box = opcao.locator(SELETORES["filtros"]["check"]).first
             if box.count() > 0:
                 tentativas += 1
-                box.click()
-                page.wait_for_timeout(200)
-                if self._check_marcado(opcao):
+                # Nunca deixa um click normal consumir o timeout padrão de
+                # 30 s. Se houver overlay/interceptação, cai rapidamente no
+                # click forçado e nas demais alternativas abaixo.
+                box.click(timeout=2_000)
+                if confirmou():
                     self._msg(f"Filtro: '{marca}' selecionada (click checkbox)")
                     return True
         except Exception:
             pass
-        # 2) clique no checkbox com force (ignore o intercept)
+        # 3) clique no checkbox com force (ignore o intercept)
         try:
             box = opcao.locator(SELETORES["filtros"]["check"]).first
             if box.count() > 0:
                 tentativas += 1
-                box.click(force=True)
-                page.wait_for_timeout(200)
-                if self._check_marcado(opcao):
+                box.click(force=True, timeout=2_000)
+                if confirmou():
                     self._msg(f"Filtro: '{marca}' selecionada (force checkbox)")
                     return True
         except Exception:
             pass
-        # 3) clique na própria linha da opção
+        # 4) clique na própria linha da opção
         try:
             tentativas += 1
-            opcao.click(force=True)
-            page.wait_for_timeout(200)
-            if self._check_marcado(opcao):
+            opcao.click(force=True, timeout=2_000)
+            if confirmou():
                 self._msg(f"Filtro: '{marca}' selecionada (click na linha)")
                 return True
         except Exception:
             pass
-        # 4) Enter na opção focada
+        # 5) Enter na opção focada
         try:
             tentativas += 1
-            opcao.focus()
+            opcao.focus(timeout=2_000)
             page.keyboard.press("Enter")
-            page.wait_for_timeout(200)
-            if self._check_marcado(opcao):
+            if confirmou():
                 self._msg(f"Filtro: '{marca}' selecionada (Enter)")
                 return True
         except Exception:
             pass
-        # 5) Espaço na opção focada
+        # 6) Espaço na opção focada
         try:
             tentativas += 1
-            opcao.focus()
+            opcao.focus(timeout=2_000)
             page.keyboard.press("Space")
-            page.wait_for_timeout(200)
-            if self._check_marcado(opcao):
+            if confirmou():
                 self._msg(f"Filtro: '{marca}' selecionada (Space)")
                 return True
         except Exception:
@@ -1331,6 +1427,61 @@ class TecDocAutomator:
         self._msg(f"Filtro: '{marca}' NÃO marcou após "
                   f"{tentativas} tentativa(s) — estado não confirmou.")
         return False
+
+    def _aplicar_marca_pela_url(self, opcao, marca: str) -> bool:
+        """Fallback sem UI para checkbox PrimeNG que não responde.
+
+        Cada opção possui `ta-value` com o ID do fornecedor (HEPU, por
+        exemplo, é 178). O TecDoc grava o mesmo ID em `brands=` na query e em
+        `brands:` no fragmento do router Angular. Atualizar ambos evita que
+        um clique perdido deixe a execução parada no overlay.
+        """
+        try:
+            brand_id = (opcao.get_attribute("ta-value") or "").strip()
+            if not brand_id or not brand_id.isdigit():
+                return False
+            return self._aplicar_marca_id_pela_url(brand_id, marca)
+        except BuscaDestravada:
+            raise
+        except Exception as exc:
+            self._msg(f"Filtro: fallback por URL falhou para '{marca}': {exc}")
+            return False
+
+    def _aplicar_marca_id_pela_url(self, brand_id: str, marca: str) -> bool:
+        """Aplica um ID de fornecedor direto na rota do TecDoc."""
+        try:
+            page = self._page
+            atual = urllib.parse.urlsplit(page.url)
+            pares = urllib.parse.parse_qsl(atual.query, keep_blank_values=True)
+            brands = []
+            for chave, valor in pares:
+                if chave == "brands":
+                    brands.extend(v for v in valor.split(",") if v)
+            if brand_id not in brands:
+                brands.append(brand_id)
+            pares = [(k, v) for k, v in pares if k != "brands"]
+            pares.append(("brands", ",".join(brands)))
+
+            fragmentos = atual.fragment.split(";") if atual.fragment else []
+            valor_fragmento = "brands:" + ",".join(brands)
+            for i, trecho in enumerate(fragmentos):
+                if trecho.startswith("brands:"):
+                    fragmentos[i] = valor_fragmento
+                    break
+            else:
+                fragmentos.append(valor_fragmento)
+            destino = urllib.parse.urlunsplit((
+                atual.scheme, atual.netloc, atual.path,
+                urllib.parse.urlencode(pares), ";".join(fragmentos),
+            ))
+            page.goto(destino, wait_until="domcontentloaded", timeout=12_000)
+            self._msg(f"Filtro: '{marca}' aplicado pela URL (fallback).")
+            return True
+        except BuscaDestravada:
+            raise
+        except Exception as exc:
+            self._msg(f"Filtro: fallback por URL falhou para '{marca}': {exc}")
+            return False
 
     @staticmethod
     def _norm(txt: str) -> str:
@@ -1354,6 +1505,7 @@ class TecDocAutomator:
         alvo = self._norm(marca)
         palavras_alvo = alvo.split()
         for _ in range(30):  # até ~4,5s, com polling menor
+            self._checar_desbloqueio()
             opcoes = page.locator(SELETORES["filtros"]["opcao"])
             for i in range(opcoes.count()):
                 try:
@@ -1395,6 +1547,7 @@ class TecDocAutomator:
 
     def _preencher_busca(self, codigo: str) -> None:
         page = self._page
+        self._checar_desbloqueio()
         # Quando a janela fica em segundo plano o Chromium pode adiar a
         # atualização da SPA. Trazer a aba para frente não depende de foco do
         # teclado do usuário, mas evita reutilizar um input desmontado durante
@@ -1412,6 +1565,7 @@ class TecDocAutomator:
         campo = localizar_campo()
         recarregado = False
         for _ in range(60):  # até 30s para o campo ficar visível
+            self._checar_desbloqueio()
             try:
                 if campo.is_visible():
                     break
@@ -1484,6 +1638,7 @@ class TecDocAutomator:
             if ja_pesquisou():
                 break
             for _ in range(20):  # até ~10s de espera por forma
+                self._checar_desbloqueio()
                 if ja_pesquisou():
                     break
                 if disparo == "Enter" and _ == 0:
@@ -1528,6 +1683,7 @@ class TecDocAutomator:
 
     def buscar_codigo(self, codigo: str) -> PecaResultado:
         """Busca um código e devolve o resultado (API interceptada + fallback DOM)."""
+        self._checar_desbloqueio()
         self._garantir_catalogo()  # anti-bug: nunca digita em tela de login
         page = self._page
         resultado = PecaResultado(codigo=codigo)
@@ -2759,16 +2915,22 @@ def executar_busca(
     capturar_api: bool = False,
     on_pausa: callable | None = None,
     on_resultado: callable | None = None,
+    deve_desbloquear: callable | None = None,
 ) -> list[PecaResultado]:
     automator = TecDocAutomator(login, senha, headless=headless, marcas=marcas,
-                                capturar_api=capturar_api, on_mensagem=on_mensagem)
+                                capturar_api=capturar_api, on_mensagem=on_mensagem,
+                                deve_desbloquear=deve_desbloquear)
     resultados: list[PecaResultado] = []
     try:
         automator.iniciar()
         automator.garantir_login()
         total = len(codigos)
         marca_anterior: str | None = None
-        for i, item in enumerate(codigos, start=1):
+        # A fila cresce no máximo uma vez por código: "Destravar" agenda o
+        # item atual no final, sem abandonar o restante do lote.
+        fila = list(codigos)
+        reagendados: set[tuple[str, str]] = set()
+        for i, item in enumerate(fila, start=1):
             if isinstance(item, dict):
                 codigo = str(item.get("codigo", "")).strip()
                 marca_item = str(item.get("marca", "")).strip()
@@ -2776,7 +2938,8 @@ def executar_busca(
                 codigo = str(item).strip()
                 marca_item = ""
             if on_progress:
-                on_progress(i, total, codigo)
+                sufixo = " (nova tentativa)" if i > total else ""
+                on_progress(min(i, total), total, codigo + sufixo)
             if not codigo:
                 continue
             # Aguarda se estiver pausado
@@ -2816,6 +2979,17 @@ def executar_busca(
                 automator._filtro_efetivado = True
             try:
                 res = automator._buscar_com_reconexao(codigo)
+            except BuscaDestravada:
+                chave = (codigo.upper(), marca_item.lower())
+                if chave not in reagendados:
+                    reagendados.add(chave)
+                    fila.append(item)
+                    automator._msg(
+                        f"[{codigo}] destravado — será tentado novamente ao fim.")
+                else:
+                    automator._msg(
+                        f"[{codigo}] destravado novamente; pulado para não travar o lote.")
+                continue
             except Exception as exc:
                 automator._rastro_abrir(
                     f"[{codigo}] EXCEÇÃO em buscar_codigo: {exc!r}")

@@ -56,8 +56,12 @@ class InputScreen(QWidget):
 
     def _build(self):
         root = QVBoxLayout()
-        root.setContentsMargins(40, 40, 40, 40)
-        root.setSpacing(16)
+        root.setContentsMargins(52, 44, 52, 44)
+        root.setSpacing(14)
+
+        eyebrow = QLabel("ETAPA 1 DE 3 · IMPORTAR")
+        eyebrow.setObjectName("eyebrow")
+        root.addWidget(eyebrow)
 
         titulo = QLabel("Códigos de peça")
         titulo.setObjectName("title")
@@ -82,6 +86,7 @@ class InputScreen(QWidget):
         self.editor.setPlaceholderText(
             "Ex.:\n095510-33040 Bosch\n54-1011; Textar\n0281301040"
         )
+        self.editor.setMinimumHeight(260)
         v.addWidget(self.editor)
 
         h = QHBoxLayout()
