@@ -4,12 +4,14 @@ import sys
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFont
 
+import config
 import database as db
 from gui.main_window import MainWindow
 from gui.styles import STYLE
 
 
 def main() -> int:
+    config.configurar_playwright()
     db.init_db()
 
     app = QApplication(sys.argv)

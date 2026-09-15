@@ -1,12 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Spec do PyInstaller para gerar cadastroauto.exe (onefile, windowed).
+r"""Spec do PyInstaller para gerar cadastroauto.exe (onedir, windowed).
 
-Gerar o exe:
+Gerar o exe (inclui copiar o Chromium para junto do executável):
+    build.bat
+
+Ou manualmente:
     pyinstaller cadastroauto.spec
+    xcopy "%LOCALAPPDATA%\ms-playwright\chromium-<rev>" "dist\cadastroauto\chromium-<rev>\" /e /i /y
+    xcopy "%LOCALAPPDATA%\ms-playwright\chromium_headless_shell-<rev>" "dist\cadastroauto\chromium_headless_shell-<rev>\" /e /i /y
 
-Requisitos: instalar pyinstaller e gerar os assets do navegador separados.
-IMPORTANTE: o Playwright baixa navegadores em cache fora do executável.
-Para embutir, o navegador precisa ser baixado e apontado via PLAYWRIGHT_BROWSERS_PATH.
+Importante: modo onedir, porque o onefile demora para extrair ~110 MB
+enquanto abre e acaba parecendo travado. O Chromium é embutido ao lado do
+exe e localizado via PLAYWRIGHT_BROWSERS_PATH (ver config.configurar_playwright).
 """
 import os
 
@@ -38,10 +43,8 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='cadastroauto',
     debug=False,
     bootloader_ignore_signals=False,
@@ -55,4 +58,15 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='cadastroauto',
 )

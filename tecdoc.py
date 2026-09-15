@@ -323,6 +323,18 @@ def _resultado_tem_falha_transiente(res) -> bool:
     return False
 
 
+def _resultado_filtro_falhou(res) -> bool:
+    """True se o resultado indica que o filtro de marcas não foi aplicado.
+
+    O `buscar_codigo` devolve esta observacao quando `_extrair_dom` detecta
+    que o filtro não refletiu na URL (?brands=) e, para não arriscar o 404,
+    não abriu o detalhe. Vale repetir o MESMO código: o site às vezes engole
+    o clique no checkbox do multiselect e a re-busca aplica o filtro normal.
+    """
+    obs = f"{res.observacao or ''}".lower()
+    return "filtro" in obs and "refletiu" in obs
+
+
 def _norm_texto(txt: str) -> str:
     """Normaliza texto p/ comparação: minúsculas, sem acentos/trema, espaços.
 
@@ -554,8 +566,13 @@ class TecDocAutomator:
 
         Se o erro for transitório (queda de rede, timeout, 5xx), chama
         _reconectar() e refaz a busca, até config.TENTATIVAS_POR_CODIGO.
+        Se o FILTRO de marcas não refletir na URL (?brands=), também refaz a
+        busca do MESMO código após config.FILTRO_RETRY_ESPERA — sem reiniciar
+        o navegador, apenas redigitando o código: o site às vezes engole o
+        clique no checkbox do multiselect.
         Erros não transitórios estouram imediatamente.
         """
+        filtro_tentativas = 0
         for tentativa in range(1, config.TENTATIVAS_POR_CODIGO + 1):
             try:
                 res = self.buscar_codigo(codigo)
@@ -571,6 +588,20 @@ class TecDocAutomator:
                     self._reconectar()
                 except Exception as exc2:
                     self._msg(f"[{codigo}] falha ao religar navegador: {exc2!r}")
+                continue
+            if _resultado_filtro_falhou(res):
+                if (filtro_tentativas >= config.FILTRO_RETRY_TENTATIVAS or
+                        tentativa >= config.TENTATIVAS_POR_CODIGO):
+                    return res
+                filtro_tentativas += 1
+                self._msg(
+                    f"[{codigo}] filtro de marcas não refletiu no site — "
+                    f"recarregando o código "
+                    f"({filtro_tentativas}/{config.FILTRO_RETRY_TENTATIVAS})…")
+                time.sleep(random.uniform(*config.FILTRO_RETRY_ESPERA))
+                # força a reaplicação do filtro na próxima busca
+                self._filtro_aplicado = False
+                self._filtro_efetivado = False
                 continue
             if not _resultado_tem_falha_transiente(res):
                 return res
@@ -1035,6 +1066,10 @@ class TecDocAutomator:
         deadline = time.time() + 45.0
         page = self._page
         try:
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
             sel = page.locator(SELETORES["filtros"]["marca_selector"])
             if sel.count() == 0:
                 return
@@ -1148,12 +1183,21 @@ class TecDocAutomator:
                 reiniciado = False
                 try:
                     sel.first.click()
-                    if campo.count():
+                    for marca in list(escolhidas):
+                        # O overlay pode ser recriado ao voltar de segundo
+                        # plano. Refiltra para não tentar clicar na opção da
+                        # marca anterior (ou em uma lista vazia/desatualizada).
+                        campo_retry = page.locator(
+                            SELETORES["filtros"]["filtro_texto"]).first
                         try:
-                            campo.first.refresh()
+                            campo_retry.wait_for(state="visible", timeout=3_000)
+                            campo_retry.focus()
+                            campo_retry.fill(marca)
+                            if campo_retry.input_value(timeout=1_000).strip() != marca:
+                                campo_retry.press("Control+A")
+                                campo_retry.press_sequential(marca, delay=20)
                         except Exception:
                             pass
-                    for marca in list(escolhidas):
                         opcao = self._achar_opcao_marca(marca)
                         if opcao is None:
                             continue
@@ -1351,13 +1395,21 @@ class TecDocAutomator:
 
     def _preencher_busca(self, codigo: str) -> None:
         page = self._page
-        # espera o campo da busca aparecer (header), não digita às cegas
+        # Quando a janela fica em segundo plano o Chromium pode adiar a
+        # atualização da SPA. Trazer a aba para frente não depende de foco do
+        # teclado do usuário, mas evita reutilizar um input desmontado durante
+        # esse intervalo.
         try:
-            campo = page.locator("input#part-search-input, "
-                                 "input[ta-name='search-input']").first
+            page.bring_to_front()
         except Exception:
-            raise BuscaNaoIniciadaError(
-                f"Campo de busca não encontrado ({codigo})")
+            pass
+
+        def localizar_campo():
+            """Devolve um locator novo; Angular pode recriar o header."""
+            return page.locator(SELETORES["busca"]["campo_texto"]).first
+
+        # espera o campo da busca aparecer (header), não digita às cegas
+        campo = localizar_campo()
         recarregado = False
         for _ in range(60):  # até 30s para o campo ficar visível
             try:
@@ -1374,6 +1426,7 @@ class TecDocAutomator:
                 try:
                     page.goto(config.TECDOC_URL, wait_until="domcontentloaded")
                     page.wait_for_timeout(800)
+                    campo = localizar_campo()
                 except Exception:
                     pass
             time.sleep(0.5)
@@ -1381,15 +1434,43 @@ class TecDocAutomator:
             raise BuscaNaoIniciadaError(
                 f"Campo de busca não ficou visível. URL: {page.url}")
 
-        # o usuário CLICA no campo antes de digitar (tem data-toggle=dropdown)
-        try:
-            campo.click(timeout=8_000)
-        except Exception:
-            pass
-        page.wait_for_timeout(250)
-        campo.fill("")
-        campo.fill(codigo)
-        page.wait_for_timeout(250)
+        def preencher_e_confirmar() -> bool:
+            """Preenche e confirma o valor no input que está vivo agora.
+
+            `fill` normalmente é suficiente, mas ocasionalmente o componente
+            do TecDoc ignora seu evento após voltar de segundo plano. Nesse
+            caso, Ctrl+A + digitação sequencial gera a mesma sequência de
+            eventos de uma digitação manual. A leitura de volta impede seguir
+            com o código anterior que ficou preso no campo.
+            """
+            nonlocal campo
+            campo = localizar_campo()
+            try:
+                campo.wait_for(state="visible", timeout=4_000)
+                campo.focus()
+                campo.click(timeout=4_000)
+                campo.fill(codigo)
+                page.wait_for_timeout(150)
+                if (campo.input_value(timeout=1_500).strip() == codigo):
+                    return True
+            except Exception:
+                pass
+            try:
+                # Reobtém o locator: o primeiro fill pode ter feito Angular
+                # trocar o nó do input.
+                campo = localizar_campo()
+                campo.focus()
+                campo.press("Control+A")
+                campo.press("Backspace")
+                campo.press_sequential(codigo, delay=25)
+                page.wait_for_timeout(250)
+                return campo.input_value(timeout=1_500).strip() == codigo
+            except Exception:
+                return False
+
+        if not preencher_e_confirmar():
+            raise BuscaNaoIniciadaError(
+                f"Campo de busca não aceitou o código '{codigo}'.")
 
         def ja_pesquisou():
             try:
@@ -1407,9 +1488,21 @@ class TecDocAutomator:
                     break
                 if disparo == "Enter" and _ == 0:
                     try:
+                        # Reconfirma antes do Enter: se houve troca de foco ou
+                        # re-render, nunca envia Enter para outro controle.
+                        if campo.input_value(timeout=1_000).strip() != codigo:
+                            if not preencher_e_confirmar():
+                                continue
+                        campo.focus()
                         campo.press("Enter")
                     except Exception:
-                        pass
+                        # Um novo input pode ter substituído o anterior entre
+                        # focus e press; uma repetição controlada é segura.
+                        try:
+                            if preencher_e_confirmar():
+                                campo.press("Enter")
+                        except Exception:
+                            pass
                 elif disparo == "sugestao" and _ == 0:
                     try:
                         sugestao = page.locator(
@@ -1870,7 +1963,7 @@ class TecDocAutomator:
         costuma demorar mais que a checagem imediata.
         """
         page = self._page
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(700)
         for _ in range(tentativas):
             try:
                 if (page.locator(SELETORES["detalhe"]["sumario"]).count() > 0
@@ -2274,9 +2367,9 @@ class TecDocAutomator:
             return melhor
 
         melhor = ""
-        # polling: até ~6s (12 tentativas a cada 500ms) enquanto a página
+        # polling: até ~4s (8 tentativas a cada 500ms) enquanto a página
         # carrega o resumo do artigo. Para antes se já achou.
-        for _ in range(12):
+        for _ in range(8):
             melhor = _valor_valido(_coletar())
             if melhor:
                 break
@@ -2303,7 +2396,7 @@ class TecDocAutomator:
             # espera o autocomplete aparecer (pode demorar no2º código)
             ac = page.locator("p-autocomplete:visible").first
             if ac.count() == 0:
-                for _ in range(10):
+                for _ in range(6):
                     page.wait_for_timeout(500)
                     if page.locator("p-autocomplete:visible").count():
                         break
@@ -2318,10 +2411,13 @@ class TecDocAutomator:
                 try:
                     botao.click(timeout=2_500)
                 except Exception:
-                    inp = ac.locator("input").first
-                    if inp.count():
-                        inp.click(timeout=2_500)
-                page.wait_for_timeout(300)
+                    try:
+                        botao.click(force=True, timeout=1_500)
+                    except Exception:
+                        inp = ac.locator("input").first
+                        if inp.count() and inp.first.is_enabled():
+                            inp.click(timeout=2_500)
+                page.wait_for_timeout(150)
 
             opcoes = page.locator(
                 "li.p-autocomplete-item[role='option']:visible, "
@@ -2336,7 +2432,7 @@ class TecDocAutomator:
                         self._norm(m) for m in marcas}:
                     marcas.append(nome)
             page.keyboard.press("Escape")
-            page.wait_for_timeout(250)
+            page.wait_for_timeout(150)
 
             juntar = {self._norm(c) for c in resultado.codigos_aplicacao}
             tabela = ac.locator("xpath=ancestor::table").first
@@ -2352,7 +2448,7 @@ class TecDocAutomator:
                     page.keyboard.press("Escape")
                     continue
                 opcao.click(timeout=2_500)
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(250)
                 if tabela.count():
                     cels = tabela.locator("tbody tr td:first-child")
                     for j in range(cels.count()):
@@ -2364,7 +2460,7 @@ class TecDocAutomator:
                             juntar.add(self._norm(cod))
                             resultado.codigos_aplicacao.append(cod)
                 page.keyboard.press("Escape")
-                page.wait_for_timeout(250)
+                page.wait_for_timeout(150)
             self._msg(
                 f"[{resultado.codigo}] códigos OE mesclados: "
                 f"{len(resultado.codigos_aplicacao)} em {len(marcas)} marca(s)"

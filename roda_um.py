@@ -22,7 +22,7 @@ auto = TecDocAutomator(USUARIO, SENHA, headless=HEADLESS,
 try:
     auto.iniciar()
     auto.garantir_login()
-    res = auto.buscar_codigo(CODIGO)
+    res = auto._buscar_com_reconexao(CODIGO)
     print("\n=== RESULTADO ===")
     for k, v in vars(res).items():
         if k.startswith("_") or v in (None, "", []):

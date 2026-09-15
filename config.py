@@ -23,6 +23,18 @@ def data_dir() -> Path:
     return d
 
 
+def configurar_playwright() -> None:
+    """Faz o Playwright achar o navegador embutido junto do exe.
+
+    O build copia as pastas chromium-<rev> e chromium_headless_shell-<rev>
+    para a mesma pasta do executável. Sem isso, o Playwright procura em
+    %LOCALAPPDATA%\\ms-playwright (o PC de destino não tem navegador).
+    Em desenvolvimento (.py) respeita o comportamento padrão.
+    """
+    if getattr(sys, "frozen", False):
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(base_path()))
+
+
 # Caminhos
 DATABASE_PATH = data_dir() / "cadastroauto.db"
 # arquivo de estado do navegador (cookies + localStorage) — usado pelo
@@ -49,7 +61,7 @@ def pausa_entre_codigos() -> None:
 DEFAULT_BRANDS = [
     "Brembo", "Bosch", "Mahle", "Bilstein", "Febi", "SWAG", "ZE",
     "TRW", "Lemförder", "Sachs", "Textar", "Hengst", "Hella",
-    "Delphi", "Pierburg", "UFI", "HEPU",
+    "Delphi", "Pierburg", "UFI", "HEPU", "Forschen",
 ]
 
 # Limite de códigos por corrida automática (evita timeout)
@@ -59,3 +71,11 @@ MAX_CODES_PER_RUN = 500
 # servidor, e a pausa (aleatória) entre tentativas, em segundos.
 TENTATIVAS_POR_CODIGO = 3
 PAUSA_ENTRE_TENTATIVAS = (5.0, 12.0)
+
+# Auto-reparo do FILTRO de marcas: se o site não confirmar o filtro na URL
+# (?brands=), a validação de marca fica sem efeito e o detalhe não abre (pra
+# evitar 404). Nessas horas o multiselect às vezes "engole" o clique no
+# checkbox; então a busca espera uma pausa e RECARREGA o mesmo código — a
+# re-busca reaplica o filtro e a segunda passada costuma pegar.
+FILTRO_RETRY_TENTATIVAS = 2
+FILTRO_RETRY_ESPERA = (3.0, 7.0)
