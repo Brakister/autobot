@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QFileDialog, QMessageBox,
     QGroupBox, QFormLayout, QLineEdit, QPlainTextEdit, QCheckBox, QScrollArea,
-    QFrame,
+    QFrame, QSplitter,
 )
 from PySide6.QtCore import Qt
 
@@ -75,10 +75,13 @@ class ReviewScreen(QWidget):
         root.addWidget(sub)
 
         # área central: tabela de resultados à esquerda + detalhes do item à direita
-        corpo = QHBoxLayout()
-        corpo.setSpacing(16)
+        # (metade/metade, com divisor arrastável pelo usuário)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
 
+        esquerda_widget = QWidget()
         esquerda = QVBoxLayout()
+        esquerda.setContentsMargins(0, 0, 8, 0)
         esquerda.setSpacing(12)
 
         self.tabela = QTableWidget(0, 6)
@@ -140,13 +143,16 @@ class ReviewScreen(QWidget):
         ex.addWidget(btn_txt)
         ex.addStretch(1)
         esquerda.addLayout(ex)
-
-        corpo.addLayout(esquerda, stretch=1)
+        esquerda_widget.setLayout(esquerda)
 
         self.painel_item = self._criar_painel_item()
-        corpo.addWidget(self.painel_item, stretch=0)
+        splitter.addWidget(esquerda_widget)
+        splitter.addWidget(self.painel_item)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([1, 1])
 
-        root.addLayout(corpo, stretch=1)
+        root.addWidget(splitter, stretch=1)
 
         self.tabela.itemSelectionChanged.connect(self._ao_selecionar)
         self.tabela.itemSelectionChanged.connect(self._mostrar_xref)
@@ -306,7 +312,7 @@ class ReviewScreen(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(box)
-        scroll.setFixedWidth(470)
+        scroll.setMinimumWidth(330)
         scroll.setMinimumHeight(360)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
 
