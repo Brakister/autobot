@@ -2857,11 +2857,28 @@ class TecDocAutomator:
                     {"url": url, "headers": headers,
                      "body": json.dumps(corpo), "timeoutMs": 12_000},
                 )
-                arr = (r.get("data", {}).get("data", {}).get("array", [])
-                       or [])
+                if not isinstance(r, dict) or "erro" in r:
+                    self._rastro_abrir(
+                        f"[{resultado.codigo}] link4 resp inválida: "
+                        f"{r!r:.200}")
+                    continue
+                j = r.get("data")
+                d = j.get("data") if isinstance(j, dict) else None
+                arr = (d.get("array", []) if isinstance(d, dict) else []) or []
+                nao_dicts = [x for x in arr if not isinstance(x, dict)]
+                if nao_dicts:
+                    self._rastro_abrir(
+                        f"[{resultado.codigo}] link4 array com itens não-dict "
+                        f"({len(nao_dicts)}/{len(arr)}): {nao_dicts[:3]!r}")
                 for it in arr:
-                    for v in (it.get("linkedVehicles", {}).get("array", [])
-                              or []):
+                    if not isinstance(it, dict):
+                        continue
+                    lv = it.get("linkedVehicles")
+                    if not isinstance(lv, dict):
+                        continue
+                    for v in (lv.get("array", []) or []):
+                        if not isinstance(v, dict):
+                            continue
                         nome = " ".join(
                             str(v.get(k, "") or "").strip()
                             for k in ("manuDesc", "modelDesc", "carDesc")
