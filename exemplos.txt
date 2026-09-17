@@ -30,3 +30,7 @@ TM1038
 
 257 por hora no win mode +/- 14,3s cada
 157 por hora with win mode +/- 30 seg cada
+
+
+opencode -s ses_f55ed2624ffeAOns8nrzswQgcl
+

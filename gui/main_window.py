@@ -297,6 +297,7 @@ class MainWindow(QMainWindow):
                 cross_refs=referencias,
                 aplicacoes=r.get("aplicacoes", []),
                 codigos_aplicacao=r.get("codigos_aplicacao", []),
+                url=r.get("url"),
             )
         db.concluir_sessao(sid)
 

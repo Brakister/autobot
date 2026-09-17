@@ -8,6 +8,10 @@ from pathlib import Path
 TECDOC_URL = "https://web.tecalliance.net/tecdoc/pt"
 LOGIN_URL = "https://login.tecalliance.net/app/UserHome?session_hint=AUTHENTICATED"
 
+# Versão do aplicativo (usada no auto-update) e repositório das releases.
+APP_VERSION = "1.1.0"
+GITHUB_REPO = "Brakister/autobot"
+
 
 def base_path() -> Path:
     """Retorna o diretório base do app (funciona dentro do PyInstaller)."""

@@ -24,21 +24,12 @@ rem ------------------------------------------------------------
 set "ISCC="
 if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 if not defined ISCC if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
-if not defined ISCC (
-    echo [ERRO] Inno Setup 6 nao encontrado. Instale de https://jrsoftware.org/isdl.php
-    pause & exit /b 1
-)
+if not defined ISCC goto :missing_iscc
 
 where gh >nul 2>nul
-if errorlevel 1 (
-    echo [ERRO] gh (GitHub CLI) nao encontrado. Instale de https://cli.github.com/
-    pause & exit /b 1
-)
+if errorlevel 1 goto :missing_gh
 gh auth status >nul 2>nul
-if errorlevel 1 (
-    echo [ERRO] gh nao autenticado. Rode:  gh auth login
-    pause & exit /b 1
-)
+if errorlevel 1 goto :missing_gh_auth
 
 set "VER=%~1"
 if not defined VER (
@@ -67,38 +58,25 @@ if exist dist\ rmdir /s /q dist
 if exist build\ rmdir /s /q build
 echo Gerando o executavel (demora alguns minutos)...
 %PY% -m PyInstaller cadastroauto.spec -y --clean
-if errorlevel 1 (
-    echo [ERRO] Falha no PyInstaller.
-    pause & exit /b 1
-)
+if errorlevel 1 goto :build_failed
 
 echo.
 echo Descobrindo a revisao do Chromium esperada...
 for /f "usebackq delims=" %%i in (`%PY% -c "import json,pathlib,playwright; p=pathlib.Path(playwright.__file__).parent/'driver'/'package'/'browsers.json'; b=json.loads(p.read_text())['browsers']; print([x['revision'] for x in b if x['name']=='chromium'][0])"`) do set "REV=%%i"
-if not defined REV (
-    echo [ERRO] Nao consegui detectar a revisao do Chromium.
-    pause & exit /b 1
-)
+if not defined REV goto :revision_failed
 echo Revisao esperada: %REV%
 
 set "PW_BASE=%LOCALAPPDATA%\ms-playwright"
 if defined PLAYWRIGHT_BROWSERS_PATH set "PW_BASE=%PLAYWRIGHT_BROWSERS_PATH%"
 
-if not exist "%PW_BASE%\chromium-%REV%" (
-    echo [ERRO] Chromium revisao %REV% nao encontrado em %PW_BASE%.
-    echo        Rode:  playwright install chromium
-    pause & exit /b 1
-)
+if not exist "%PW_BASE%\chromium-%REV%" goto :chromium_missing
 echo Copiando chromium-%REV% (aguarde)...
 xcopy "%PW_BASE%\chromium-%REV%" "dist\cadastroauto\chromium-%REV%\" /e /i /q /y >nul
-if errorlevel 1 (
-    echo [ERRO] Falha ao copiar chromium-%REV%.
-    pause & exit /b 1
-)
-if exist "%PW_BASE%\chromium_headless_shell-%REV%" (
-    echo Copiando chromium_headless_shell-%REV% (aguarde)...
-    xcopy "%PW_BASE%\chromium_headless_shell-%REV%" "dist\cadastroauto\chromium_headless_shell-%REV%\" /e /i /q /y >nul
-)
+if errorlevel 1 goto :chromium_copy_failed
+if not exist "%PW_BASE%\chromium_headless_shell-%REV%" goto :skip_headless
+echo Copiando chromium_headless_shell-%REV% (aguarde)...
+xcopy "%PW_BASE%\chromium_headless_shell-%REV%" "dist\cadastroauto\chromium_headless_shell-%REV%\" /e /i /q /y >nul
+:skip_headless
 echo Chromium OK.
 
 rem ------------------------------------------------------------
@@ -111,14 +89,11 @@ mkdir "%SHORT%"
 echo.
 echo Copiando app para caminho curto (pode demorar ~1 GB)...
 xcopy "dist\cadastroauto" "%SHORT%\cadastroauto" /e /i /q /y >nul
-if errorlevel 1 (
-    echo [ERRO] Falha ao copiar para o caminho curto.
-    pause & exit /b 1
-)
+if errorlevel 1 goto :short_copy_failed
 
 rem Gera o .iss com o caminho curto
 (
-    echo ; Instalador do CadastroAuto (gerado pelo release.bat - NAO editar)
+    echo ; Instalador do CadastroAuto - gerado pelo release.bat - NAO editar
     echo #define MyAppName "Cadastro Auto"
     echo #define MyAppVersion "%VER%"
     echo #define MyAppPublisher "Starke Parts"
@@ -166,17 +141,11 @@ rem Gera o .iss com o caminho curto
 
 echo Compilando instalador (pode demorar 5-10 minutos)...
 "%ISCC%" "%SHORT%\cadastroauto_setup.iss"
-if errorlevel 1 (
-    echo [ERRO] Falha no Inno Setup.
-    pause & exit /b 1
-)
+if errorlevel 1 goto :installer_failed
 
 mkdir "dist\installer" 2>nul
 copy /y "%SHORT%\installer\CadastroAuto-Setup.exe" "dist\installer\CadastroAuto-Setup.exe" >nul
-if errorlevel 1 (
-    echo [ERRO] Falha ao copiar o instalador para dist\installer.
-    pause & exit /b 1
-)
+if errorlevel 1 goto :installer_copy_failed
 
 echo.
 echo Instalador OK: dist\installer\CadastroAuto-Setup.exe
@@ -211,3 +180,45 @@ echo  RELEASE v%VER% PUBLICADA!
 echo  Veja em: https://github.com/Brakister/autobot/releases
 echo ============================================
 pause
+exit /b 0
+
+:missing_iscc
+echo [ERRO] Inno Setup 6 nao encontrado. Instale de https://jrsoftware.org/isdl.php
+exit /b 1
+
+:missing_gh
+echo [ERRO] gh (GitHub CLI) nao encontrado. Instale de https://cli.github.com/
+exit /b 1
+
+:missing_gh_auth
+echo [ERRO] gh nao autenticado. Rode: gh auth login
+exit /b 1
+
+:build_failed
+echo [ERRO] Falha no PyInstaller.
+exit /b 1
+
+:revision_failed
+echo [ERRO] Nao consegui detectar a revisao do Chromium.
+exit /b 1
+
+:chromium_missing
+echo [ERRO] Chromium revisao %REV% nao encontrado em %PW_BASE%.
+echo        Rode: playwright install chromium
+exit /b 1
+
+:chromium_copy_failed
+echo [ERRO] Falha ao copiar chromium-%REV%.
+exit /b 1
+
+:short_copy_failed
+echo [ERRO] Falha ao copiar para o caminho curto.
+exit /b 1
+
+:installer_failed
+echo [ERRO] Falha no Inno Setup.
+exit /b 1
+
+:installer_copy_failed
+echo [ERRO] Falha ao copiar o instalador para dist\installer.
+exit /b 1

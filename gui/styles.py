@@ -57,6 +57,21 @@ QPushButton#danger:hover {
     background-color: #f5a3bb;
 }
 
+QPushButton#success {
+    background-color: #16a34a;
+    color: #ffffff;
+    border: 1px solid #22c55e;
+    border-radius: 6px;
+    padding: 7px 16px;
+    font-weight: 600;
+}
+QPushButton#success:hover {
+    background-color: #22c55e;
+}
+QPushButton#success:pressed {
+    background-color: #1a8f3a;
+}
+
 /* Campos de texto */
 QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox {
     background-color: #313244;

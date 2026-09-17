@@ -43,6 +43,7 @@ def _da_db(row: dict) -> dict:
             for r in row.get("cross_refs", [])
         ],
         "gtin": row.get("gtin", "") or "",
+        "url": row.get("url", "") or "",
         "aplicacoes": _parse_lista(row.get("aplicacoes")),
         "codigos_aplicacao": _parse_lista(row.get("codigos_aplicacao")),
     }

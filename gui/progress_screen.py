@@ -1,40 +1,50 @@
 """Tela de progresso mostrada enquanto a automação Playwright roda."""
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPlainTextEdit,
-    QPushButton, QDialog, QTextEdit,
+    QPushButton, QDialog, QTextEdit, QApplication,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 
+import export as exp
+from gui.ui_utils import flash_sucesso
+
 
 class PreviewDialog(QDialog):
-    """Diálogo que mostra preview do texto no formato .txt."""
-    
+    """Diálogo com a ficha .txt — editável e com botão de copiar."""
+
     def __init__(self, texto: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Preview Parcial .txt")
-        self.setMinimumSize(500, 400)
-        
+        self.setWindowTitle("Ficha .txt")
+        self.setMinimumSize(520, 420)
+
         layout = QVBoxLayout()
-        
-        sub = QLabel("Preview dos resultados já coletados no formato .txt:")
+
+        sub = QLabel("Ficha no formato .txt — edite e copie se precisar:")
         sub.setObjectName("subtitle")
         layout.addWidget(sub)
-        
+
         self.texto = QTextEdit()
-        self.texto.setReadOnly(True)
         self.texto.setPlainText(texto)
         self.texto.setFont(QFont("Consolas", 10))
         layout.addWidget(self.texto)
-        
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch(1)
+        btn_copiar = QPushButton("Copiar")
+        btn_copiar.setObjectName("primary")
+        btn_copiar.clicked.connect(self._copiar)
+        btn_layout.addWidget(btn_copiar)
         btn_fechar = QPushButton("Fechar")
         btn_fechar.clicked.connect(self.close)
         btn_layout.addWidget(btn_fechar)
         layout.addLayout(btn_layout)
-        
+
         self.setLayout(layout)
+
+    def _copiar(self):
+        QApplication.clipboard().setText(self.texto.toPlainText())
+        flash_sucesso(btn_copiar)
 
 
 class ProgressScreen(QWidget):
@@ -151,59 +161,10 @@ class ProgressScreen(QWidget):
         self._resultados_parciais = resultados
 
     def _gerar_preview_txt(self) -> str:
-        """Gera o preview no formato .txt do coisas.md."""
+        """Gera o preview no formato .txt (uma ficha por peça)."""
         if not self._resultados_parciais:
             return "Nenhum resultado coletado ainda."
-        
-        linhas = []
-        for r in self._resultados_parciais:
-            codigo = str(r.get("codigo", "")).upper()
-            marca = str(r.get("marca", "")).upper()
-            gtin = str(r.get("gtin", "")).upper()
-            descricao = str(r.get("descricao", "")).upper()
-            
-            # Cross-references como códigos
-            cross_refs = r.get("cross_refs", [])
-            codigos_extra = []
-            for ref in cross_refs:
-                if isinstance(ref, dict):
-                    codigos_extra.append(ref.get("codigo_ref", ""))
-                elif ref:
-                    codigos_extra.append(ref[0] if len(ref) > 0 else "")
-            # Remove duplicados preservando ordem
-            vistos = set()
-            codigos_unicos = []
-            for c in codigos_extra:
-                c_upper = c.upper()
-                if c_upper and c_upper not in vistos:
-                    vistos.add(c_upper)
-                    codigos_unicos.append(c_upper)
-            codigos_str = ",".join(codigos_unicos)
-            if codigos_str:
-                codigos_str += ";"
-            
-            # Aplicações
-            aplicacoes = r.get("aplicacoes", [])
-            aplicacoes_texto = "\n".join(str(a).upper() for a in aplicacoes) if aplicacoes else "-"
-            
-            linhas.append(f"{codigo}   {marca}")
-            linhas.append("")
-            if gtin:
-                linhas.append(f"GTIN: {gtin}")
-            linhas.append("")
-            linhas.append(f"PRODUTO:")
-            linhas.append(f"{descricao}")
-            linhas.append("")
-            linhas.append(f"INFORMAÇÕES TÉCNICAS:")
-            linhas.append(f"CÓDIGOS: {codigos_str}")
-            linhas.append(f"MARCA: {marca}")
-            linhas.append("")
-            linhas.append(f"APLICAÇÕES:")
-            linhas.append(f"{aplicacoes_texto}")
-            linhas.append("")
-            linhas.append("")  # Linha em branco entre peças
-        
-        return "\n".join(linhas)
+        return "\n".join(exp.texto_ficha(r) for r in self._resultados_parciais)
 
     def _mostrar_preview(self):
         """Mostra o diálogo de preview."""

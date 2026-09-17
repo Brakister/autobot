@@ -1,15 +1,20 @@
 """Tela de revisão 'Está tudo certo?' com tabela editável.
 
-Permite ao usuário revisar, editar (inline ou via diálogo no duplo clique),
-remover linhas e, ao confirmar, salvar no SQLite e exportar CSV/XLSX/XLS/TXT.
+Permite revisar e editar as linhas, remover peças e, ao confirmar, salvar no
+SQLite e exportar CSV/XLSX/XLS/TXT. Ao clicar numa peça, a ficha .txt dela é
+mostrada no painel lateral, editável e com botão de copiar.
 """
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QFileDialog, QMessageBox,
-    QGroupBox, QFormLayout, QLineEdit, QPlainTextEdit, QCheckBox, QScrollArea,
-    QFrame, QSplitter,
+    QGroupBox, QScrollArea, QFrame, QSplitter, QTextEdit, QApplication,
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
+
+import html
+
+from gui.ui_utils import flash_sucesso
 
 import database as db
 import export as exp
@@ -36,6 +41,8 @@ class ReviewScreen(QWidget):
         self.on_salvar_e_voltar = on_salvar_e_voltar
         self.on_encerrar = on_encerrar
         self.modo = modo
+        self._fichas: dict[str, str] = {}
+        self._sel_codigo: str | None = None
         self._build()
         self._popular()
 
@@ -62,8 +69,9 @@ class ReviewScreen(QWidget):
         else:
             titulo = QLabel("Está tudo certo?")
             sub = QLabel(
-                "Revise os resultados abaixo. Você pode editar qualquer campo, "
-                "marcar/desmarcar disponível e remover linhas antes de confirmar."
+                "Revise os resultados abaixo. Clique numa peça para ver e "
+                "editar a ficha .txt dela (e copiar). Você também pode editar "
+                "qualquer campo, marcar/desmarcar disponível e remover linhas."
             )
         eyebrow = QLabel("REVISÃO E EXPORTAÇÃO")
         eyebrow.setObjectName("eyebrow")
@@ -89,7 +97,7 @@ class ReviewScreen(QWidget):
             ["Código", "Descrição", "Marca", "GTIN", "Disponível", "Observação"]
         )
         self.tabela.setEditTriggers(
-            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+            QAbstractItemView.EditKeyPressed
         )
         self.tabela.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tabela.setAlternatingRowColors(True)
@@ -101,16 +109,6 @@ class ReviewScreen(QWidget):
         esquerda.addWidget(self.tabela, stretch=1)
 
         self.tabela.itemChanged.connect(self._item_editado)
-
-        # Resumo cross-references (mostrado ao selecionar uma linha)
-        box_xref = QGroupBox("Cross-references da peça selecionada")
-        vx = QVBoxLayout()
-        self.lbl_xref = QLabel("Selecione uma linha para ver as referências cruzadas.")
-        self.lbl_xref.setObjectName("subtitle")
-        self.lbl_xref.setWordWrap(True)
-        vx.addWidget(self.lbl_xref)
-        box_xref.setLayout(vx)
-        esquerda.addWidget(box_xref)
 
         # Ações de linha
         acoes = QHBoxLayout()
@@ -155,7 +153,6 @@ class ReviewScreen(QWidget):
         root.addWidget(splitter, stretch=1)
 
         self.tabela.itemSelectionChanged.connect(self._ao_selecionar)
-        self.tabela.itemSelectionChanged.connect(self._mostrar_xref)
 
         self.lbl_resumo = QLabel("")
         self.lbl_resumo.setObjectName("ok")
@@ -197,6 +194,7 @@ class ReviewScreen(QWidget):
     # -- população ----------------------------------------------------------
 
     def _popular(self):
+        self._fichas.clear()
         self.tabela.blockSignals(True)
         self.tabela.setRowCount(0)
         for r in self.resultados:
@@ -242,6 +240,7 @@ class ReviewScreen(QWidget):
             {
                 "aplicacoes": r.get("aplicacoes", []),
                 "codigos_aplicacao": r.get("codigos_aplicacao", []),
+                "url": r.get("url", ""),
             },
         )
 
@@ -249,151 +248,114 @@ class ReviewScreen(QWidget):
         # se o usuário clicar no checkbox de disponível
         if item.column() == self.COL_DISPONIVEL:
             item.setText("Sim" if item.checkState() == Qt.Checked else "Não")
+            return
+        # se o campo editado for da peça em exibição e a ficha ainda não foi
+        # personalizada, regenera a ficha para refletir a edição
+        codigo = self._sel_codigo
+        if codigo and codigo not in self._fichas:
+            if self._linha_do_codigo(codigo) == item.row():
+                self._set_ficha(exp.texto_ficha(self._linha_para_dict(item.row())))
 
     # -- painel lateral do item selecionado ----------------------------------
 
     def _criar_painel_item(self) -> QScrollArea:
-        """Painel à direita com os dados individuais do item selecionado."""
-        box = QGroupBox("Dados do item selecionado")
-        form = QFormLayout()
-        form.setSpacing(8)
+        """Painel à direita: ficha .txt da peça selecionada (edita e copia)."""
+        box = QGroupBox("Ficha .txt da peça selecionada")
+        v = QVBoxLayout()
+        v.setSpacing(8)
 
-        self.p_codigo = QLineEdit()
-        self.p_codigo.setReadOnly(True)
-        form.addRow("Código:", self.p_codigo)
+        # link do produto referenciado no TecDoc (conferência na revisão)
+        self.p_link = QLabel()
+        self.p_link.setObjectName("subtitle")
+        self.p_link.setWordWrap(True)
+        self.p_link.setTextFormat(Qt.RichText)
+        self.p_link.setOpenExternalLinks(True)
+        self.p_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        v.addWidget(self.p_link)
 
-        self.p_descricao = QLineEdit()
-        form.addRow("Descrição:", self.p_descricao)
-
-        self.p_marca = QLineEdit()
-        form.addRow("Marca:", self.p_marca)
-
-        self.p_gtin = QLineEdit()
-        form.addRow("GTIN:", self.p_gtin)
-
-        self.p_disponivel = QCheckBox("Disponível")
-        form.addRow("Disponível:", self.p_disponivel)
-
-        self.p_observacao = QPlainTextEdit()
-        self.p_observacao.setFixedHeight(55)
-        form.addRow("Observação:", self.p_observacao)
-
-        self.p_refs = QPlainTextEdit()
-        self.p_refs.setPlaceholderText(
-            "Uma referência por linha: CODIGO;MARCA\nEx.: 34206891086;BMW"
+        self.p_ficha = QTextEdit()
+        self.p_ficha.setFont(QFont("Consolas", 10))
+        self.p_ficha.setPlaceholderText(
+            "Clique numa peça para ver a ficha .txt dela."
         )
-        form.addRow("Cross-references:", self.p_refs)
+        v.addWidget(self.p_ficha, stretch=1)
+        self.p_ficha.textChanged.connect(self._on_ficha_editada)
 
-        self.p_codigos_apl = QPlainTextEdit()
-        self.p_codigos_apl.setPlaceholderText("Um código por linha")
-        form.addRow("Códigos da aplicação:", self.p_codigos_apl)
-
-        self.p_aplicacoes = QPlainTextEdit()
-        self.p_aplicacoes.setPlaceholderText(
-            "Uma aplicação por linha\nEx.: BMW 1 (F40) 2019-"
-        )
-        form.addRow("Aplicações:", self.p_aplicacoes)
-
-        btn_aplicar = QPushButton("Aplicar alterações ←")
-        btn_aplicar.setObjectName("primary")
-        btn_aplicar.clicked.connect(self._painel_aplicar)
-        form.addRow(btn_aplicar)
+        acoes = QHBoxLayout()
+        btn_copiar = QPushButton("Copiar")
+        btn_copiar.setObjectName("primary")
+        btn_copiar.clicked.connect(self._copiar_ficha)
+        acoes.addWidget(btn_copiar)
+        btn_regenerar = QPushButton("Regenerar da linha")
+        btn_regenerar.clicked.connect(self._regenerar_ficha)
+        acoes.addWidget(btn_regenerar)
+        acoes.addStretch(1)
+        v.addLayout(acoes)
 
         dica = QLabel(
-            "Edite os campos e clique em 'Aplicar alterações' para gravar na "
-            "linha. Selecione outra linha para trocar o item."
+            "Clique numa peça para ver a ficha .txt dela. Edite o texto à "
+            "vontade e use 'Copiar'. O texto editado também é usado no "
+            "'Preview .txt' e no 'Exportar .txt'."
         )
         dica.setObjectName("subtitle")
         dica.setWordWrap(True)
-        form.addRow(dica)
+        v.addWidget(dica)
 
-        box.setLayout(form)
+        box.setLayout(v)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(box)
-        scroll.setMinimumWidth(330)
+        scroll.setMinimumWidth(360)
         scroll.setMinimumHeight(360)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-
         self._painel_limpar()
         return scroll
 
     def _painel_limpar(self):
-        self.p_codigo.clear()
-        self.p_descricao.clear()
-        self.p_marca.clear()
-        self.p_gtin.clear()
-        self.p_disponivel.setChecked(False)
-        self.p_observacao.clear()
-        self.p_refs.clear()
-        self.p_codigos_apl.clear()
-        self.p_aplicacoes.clear()
+        self.p_ficha.blockSignals(True)
+        self.p_ficha.clear()
+        self.p_ficha.blockSignals(False)
+        self.p_link.setText("Produto referenciado: selecione uma peça.")
+        self._sel_codigo = None
 
-    def _painel_mostrar(self, dados: dict):
-        """Preenche o painel com os dados do item selecionado."""
-        if not dados or not dados.get("codigo"):
-            self._painel_limpar()
+    def _mostrar_link(self, url: str):
+        """Mostra o link do produto referenciado (abre no navegador)."""
+        url = (url or "").strip()
+        if not url:
+            self.p_link.setText(
+                "Produto referenciado: link não disponível para esta peça.")
             return
-        self.p_codigo.setText(str(dados.get("codigo", "")))
-        self.p_descricao.setText(str(dados.get("descricao", "")))
-        self.p_marca.setText(str(dados.get("marca", "")))
-        self.p_gtin.setText(str(dados.get("gtin", "")))
-        self.p_disponivel.setChecked(bool(dados.get("disponivel", False)))
-        self.p_observacao.setPlainText(str(dados.get("observacao", "")))
-
-        linhas = []
-        for ref in dados.get("cross_refs", []) or []:
-            if isinstance(ref, dict):
-                linhas.append(
-                    f"{ref.get('codigo_ref', '')};"
-                    f"{ref.get('marca_ref', '') or ''}"
-                )
-            elif ref:
-                linhas.append(
-                    f"{ref[0] if len(ref) > 0 else ''};"
-                    f"{ref[1] if len(ref) > 1 and ref[1] else ''}"
-                )
-        self.p_refs.setPlainText("\n".join(linhas))
-        self.p_codigos_apl.setPlainText(
-            "\n".join(str(c) for c in dados.get("codigos_aplicacao", []))
-        )
-        self.p_aplicacoes.setPlainText(
-            "\n".join(str(a) for a in dados.get("aplicacoes", []))
+        seguro = html.escape(url, quote=True)
+        self.p_link.setText(
+            f'Produto referenciado: <a href="{seguro}">{seguro}</a>'
         )
 
-    def _painel_para_dict(self) -> dict:
-        refs = []
-        for linha in self.p_refs.toPlainText().splitlines():
-            linha = linha.strip()
-            if not linha:
-                continue
-            partes = [p.strip() for p in linha.split(";", 1)]
-            cod = partes[0]
-            marca = partes[1] if len(partes) > 1 and partes[1] else None
-            if cod:
-                refs.append({"codigo_ref": cod, "marca_ref": marca})
-        return {
-            "codigo": self.p_codigo.text(),
-            "descricao": self.p_descricao.text(),
-            "marca": self.p_marca.text(),
-            "gtin": self.p_gtin.text(),
-            "disponivel": self.p_disponivel.isChecked(),
-            "observacao": self.p_observacao.toPlainText(),
-            "cross_refs": refs,
-            "codigos_aplicacao": [
-                c.strip()
-                for c in self.p_codigos_apl.toPlainText().splitlines()
-                if c.strip()
-            ],
-            "aplicacoes": [
-                a.strip()
-                for a in self.p_aplicacoes.toPlainText().splitlines()
-                if a.strip()
-            ],
-        }
+    def _linha_do_codigo(self, codigo: str) -> int:
+        for row in range(self.tabela.rowCount()):
+            it = self.tabela.item(row, self.COL_CODIGO)
+            if it and it.text() == codigo:
+                return row
+        return -1
+
+    def _set_ficha(self, texto: str):
+        self.p_ficha.blockSignals(True)
+        self.p_ficha.setPlainText(texto)
+        self.p_ficha.blockSignals(False)
+
+    def _on_ficha_editada(self):
+        """Mantém a edição da ficha atrelada à peça selecionada."""
+        codigo = self._sel_codigo
+        if not codigo:
+            return
+        texto = self.p_ficha.toPlainText()
+        if texto.strip():
+            self._fichas[codigo] = texto
+        else:
+            self._fichas.pop(codigo, None)
 
     def _ao_selecionar(self):
+        self._on_ficha_editada()
         rows = self.tabela.selectionModel().selectedRows()
         if not rows:
             self._painel_limpar()
@@ -402,22 +364,34 @@ class ReviewScreen(QWidget):
         if self._linha_vazia(row):
             self._painel_limpar()
             return
-        self._painel_mostrar(self._linha_para_dict(row))
+        dados = self._linha_para_dict(row)
+        codigo = str(dados.get("codigo", ""))
+        self._sel_codigo = codigo
+        self._mostrar_link(dados.get("url", ""))
+        if codigo in self._fichas:
+            self._set_ficha(self._fichas[codigo])
+        else:
+            self._set_ficha(exp.texto_ficha(dados))
 
-    def _painel_aplicar(self):
-        rows = self.tabela.selectionModel().selectedRows()
-        if not rows:
+    def _copiar_ficha(self):
+        texto = self.p_ficha.toPlainText()
+        if not texto.strip():
             QMessageBox.information(
-                self, "Nenhum item selecionado",
-                "Clique numa linha da tabela antes de aplicar.")
+                self, "Nada para copiar", "Selecione uma peça primeiro.")
             return
-        row = rows[0].row()
-        if self._linha_vazia(row):
+        QApplication.clipboard().setText(texto)
+        flash_sucesso(btn_copiar)
+
+    def _regenerar_ficha(self):
+        """Descarta a edição e regenera a ficha a partir dos dados da linha."""
+        codigo = self._sel_codigo
+        if not codigo:
             return
-        dados = self._painel_para_dict()
-        self._aplicar_dict_na_linha(row, dados)
-        self._atualizar_resumo()
-        self._painel_mostrar(dados)
+        row = self._linha_do_codigo(codigo)
+        if row < 0:
+            return
+        self._fichas.pop(codigo, None)
+        self._set_ficha(exp.texto_ficha(self._linha_para_dict(row)))
 
     def _linha_vazia(self, row: int) -> bool:
         it = self.tabela.item(row, self.COL_CODIGO)
@@ -438,28 +412,8 @@ class ReviewScreen(QWidget):
             "cross_refs": cross_refs,
             "aplicacoes": extras.get("aplicacoes", []),
             "codigos_aplicacao": extras.get("codigos_aplicacao", []),
+            "url": extras.get("url", ""),
         }
-
-    def _aplicar_dict_na_linha(self, row: int, dados: dict) -> None:
-        self.tabela.blockSignals(True)
-        self.tabela.item(row, self.COL_DESCRICAO).setText(str(dados.get("descricao", "")))
-        self.tabela.item(row, self.COL_MARCA).setText(str(dados.get("marca", "")))
-        self.tabela.item(row, self.COL_GTIN).setText(str(dados.get("gtin", "")))
-        disp_item = self.tabela.item(row, self.COL_DISPONIVEL)
-        disp_item.setCheckState(Qt.Checked if dados.get("disponivel") else Qt.Unchecked)
-        disp_item.setText("Sim" if dados.get("disponivel") else "Não")
-        self.tabela.item(row, self.COL_OBS).setText(str(dados.get("observacao", "")))
-        self.tabela.item(row, self.COL_CODIGO).setData(
-            Qt.UserRole, dados.get("cross_refs", [])
-        )
-        self.tabela.item(row, self.COL_CODIGO).setData(
-            Qt.UserRole + 1,
-            {
-                "aplicacoes": dados.get("aplicacoes", []),
-                "codigos_aplicacao": dados.get("codigos_aplicacao", []),
-            },
-        )
-        self.tabela.blockSignals(False)
 
     # -- leitura ------------------------------------------------------------
 
@@ -488,6 +442,7 @@ class ReviewScreen(QWidget):
                 "gtin": gtin,
                 "aplicacoes": extras.get("aplicacoes", []),
                 "codigos_aplicacao": extras.get("codigos_aplicacao", []),
+                "url": extras.get("url", ""),
             })
         return finais
 
@@ -499,27 +454,6 @@ class ReviewScreen(QWidget):
         )
         self.lbl_resumo.setText(f"{n} peça(s) · {disp} disponível(is)")
 
-    def _mostrar_xref(self):
-        rows = self.tabela.selectionModel().selectedRows()
-        if not rows:
-            return
-        row = rows[0].row()
-        refs = self.tabela.item(row, self.COL_CODIGO).data(Qt.UserRole) or []
-        if refs:
-            linhas = []
-            for ref in refs:
-                if isinstance(ref, dict):
-                    marca = ref.get("marca_ref", "-")
-                    codigo = ref.get("codigo_ref", "")
-                else:
-                    codigo = ref[0] if len(ref) > 0 else ""
-                    marca = ref[1] if len(ref) > 1 and ref[1] else "-"
-                linhas.append(f"   {marca}: {codigo}")
-            texto = "\n".join(linhas)
-            self.lbl_xref.setText(texto)
-        else:
-            self.lbl_xref.setText("Sem cross-references registradas.")
-
     # -- ações --------------------------------------------------------------
 
     def _remover_selecionada(self):
@@ -528,6 +462,9 @@ class ReviewScreen(QWidget):
             return
         rows.sort(key=lambda idx: idx.row(), reverse=True)
         for idx in rows:
+            it = self.tabela.item(idx.row(), self.COL_CODIGO)
+            if it:
+                self._fichas.pop(it.text(), None)
             self.tabela.removeRow(idx.row())
         self._atualizar_resumo()
         self._painel_limpar()
@@ -603,52 +540,13 @@ class ReviewScreen(QWidget):
         dialog.exec()
 
     def _gerar_txt(self, finais: list[dict]) -> str:
-        """Gera o texto no formato do coisas.md."""
-        linhas = []
+        """Gera o texto no formato do coisas.md, usando as fichas editadas."""
+        blocos = []
         for r in finais:
-            codigo = str(r.get("codigo", "")).upper()
-            marca = str(r.get("marca", "")).upper()
-            gtin = str(r.get("gtin", "")).upper()
-            descricao = str(r.get("descricao", "")).upper()
-
-            cross_refs = r.get("cross_refs", [])
-            codigos_extra = []
-            for ref in cross_refs:
-                if isinstance(ref, dict):
-                    codigos_extra.append(ref.get("codigo_ref", ""))
-                elif ref:
-                    codigos_extra.append(ref[0] if len(ref) > 0 else "")
-            vistos = set()
-            codigos_unicos = []
-            for c in codigos_extra:
-                c_upper = c.upper()
-                if c_upper and c_upper not in vistos:
-                    vistos.add(c_upper)
-                    codigos_unicos.append(c_upper)
-            codigos_str = ",".join(codigos_unicos)
-            if codigos_str:
-                codigos_str += ";"
-
-            aplicacoes = r.get("aplicacoes", [])
-            aplicacoes_texto = "\n".join(str(a).upper() for a in aplicacoes) if aplicacoes else "-"
-
-            linhas.append(f"{codigo}   {marca}")
-            linhas.append("")
-            if gtin:
-                linhas.append(f"GTIN: {gtin}")
-            linhas.append("")
-            linhas.append("PRODUTO:")
-            linhas.append(descricao)
-            linhas.append("")
-            linhas.append("INFORMAÇÕES TÉCNICAS:")
-            linhas.append(f"CÓDIGOS: {codigos_str}")
-            linhas.append(f"MARCA: {marca}")
-            linhas.append("")
-            linhas.append("APLICAÇÕES:")
-            linhas.append(aplicacoes_texto)
-            linhas.append("")
-            linhas.append("")
-        return "\n".join(linhas)
+            codigo = str(r.get("codigo", ""))
+            txt = self._fichas.get(codigo)
+            blocos.append(txt if txt is not None else exp.texto_ficha(r))
+        return "\n".join(blocos)
 
     def _confirmar(self):
         finais = self._linhas_finais()

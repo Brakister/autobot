@@ -124,3 +124,65 @@ def exportar_xls(resultados: list[dict], caminho: str | Path | None = None) -> s
 
     wb.save(str(caminho))
     return str(caminho)
+
+
+def texto_ficha(r: dict) -> str:
+    """Gera o texto de UMA peça no formato .txt (modelo do coisas.md)."""
+    linhas = []
+    codigo = str(r.get("codigo", "")).upper()
+    marca = str(r.get("marca", "")).upper()
+    gtin = str(r.get("gtin", "")).upper()
+    descricao = str(r.get("descricao", "")).upper()
+
+    cross_refs = r.get("cross_refs", [])
+    codigos_extra = []
+    for ref in cross_refs:
+        if isinstance(ref, dict):
+            codigos_extra.append(ref.get("codigo_ref", ""))
+        elif ref:
+            codigos_extra.append(ref[0] if len(ref) > 0 else "")
+    vistos = set()
+    codigos_unicos = []
+    for c in codigos_extra:
+        c_upper = c.upper()
+        if c_upper and c_upper not in vistos:
+            vistos.add(c_upper)
+            codigos_unicos.append(c_upper)
+    codigos_str = ",".join(codigos_unicos)
+    if codigos_str:
+        codigos_str += ";"
+
+    aplicacoes = r.get("aplicacoes", [])
+    aplicacoes_texto = (
+        "\n".join(str(a).upper() for a in aplicacoes) if aplicacoes else "-"
+    )
+
+    linhas.append(f"{codigo}   {marca}")
+    linhas.append("")
+    if gtin:
+        linhas.append(f"GTIN: {gtin}")
+    linhas.append("")
+    linhas.append("PRODUTO:")
+    linhas.append(descricao)
+    linhas.append("")
+    linhas.append("INFORMAÇÕES TÉCNICAS:")
+    linhas.append(f"CÓDIGOS: {codigos_str}")
+    linhas.append(f"MARCA: {marca}")
+    linhas.append("")
+    linhas.append("APLICAÇÕES:")
+    linhas.append(aplicacoes_texto)
+    linhas.append("")
+    linhas.append("")
+    return "\n".join(linhas)
+
+
+def exportar_txt_fichas(resultados: list[dict],
+                        caminho: str | Path | None = None) -> str:
+    """Exporta as fichas em texto (.txt), uma peça por bloco."""
+    caminho = caminho or config.EXPORT_DIR / "fichas.txt"
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    texto = "\n".join(texto_ficha(r) for r in resultados)
+    with open(caminho, "w", encoding="utf-8") as f:
+        f.write(texto)
+    return str(caminho)

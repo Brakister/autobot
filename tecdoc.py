@@ -2336,6 +2336,12 @@ class TecDocAutomator:
     def _extrair_detalhe(self, resultado: PecaResultado) -> None:
         """Lê o sumário do artigo e a tabela 'Número OE' (cross-references)."""
         page = self._page
+        # link do artigo aberto no TecDoc (usado na revisão, para conferência)
+        try:
+            if page and page.url:
+                resultado.url = page.url
+        except Exception:
+            pass
         # ---- resumo (Marca / Número do artigo / Grupo de produtos) ----
         try:
             sumario: dict[str, str] = {}
