@@ -35,7 +35,7 @@ set "VER=%~1"
 if not defined VER (
     for /f "usebackq delims=" %%v in (`findstr /r "#define MyAppVersion" cadastroauto.iss`) do set "VERLINE=%%v"
     for /f "tokens=3 delims= " %%v in ("!VERLINE!") do set "VER=%%~v"
-    if not defined VER set "VER=1.2.0"
+    if not defined VER set "VER=1.2.1"
 )
 echo === Release CadastroAuto v%VER% ===
 echo.
@@ -50,6 +50,14 @@ if not defined PY (
     echo [ERRO] Python nao encontrado. Instale o Python 3.10+ primeiro.
     pause & exit /b 1
 )
+
+rem A versao precisa ser gravada no codigo antes do PyInstaller. Sem isso,
+rem o exe continua reportando a versao antiga e oferece a mesma atualizacao
+rem novamente ao abrir.
+%PY% -c "from pathlib import Path; p=Path('config.py'); s=p.read_text(encoding='utf-8'); start=s.index('APP_VERSION = '); end=s.index(chr(10), start); p.write_text(s[:start] + 'APP_VERSION = ' + chr(34) + '%VER%' + chr(34) + s[end:], encoding='utf-8')"
+if errorlevel 1 goto :version_failed
+echo Versao gravada em config.py: %VER%
+echo.
 
 rem ------------------------------------------------------------
 rem 2. Build do exe + Chromium (mesma logica do build.bat)
@@ -196,6 +204,10 @@ exit /b 1
 
 :build_failed
 echo [ERRO] Falha no PyInstaller.
+exit /b 1
+
+:version_failed
+echo [ERRO] Nao foi possivel atualizar APP_VERSION em config.py.
 exit /b 1
 
 :revision_failed

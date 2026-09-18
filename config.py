@@ -9,7 +9,7 @@ TECDOC_URL = "https://web.tecalliance.net/tecdoc/pt"
 LOGIN_URL = "https://login.tecalliance.net/app/UserHome?session_hint=AUTHENTICATED"
 
 # Versão do aplicativo (usada no auto-update) e repositório das releases.
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.1"
 GITHUB_REPO = "Brakister/autobot"
 
 
