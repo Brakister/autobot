@@ -15,7 +15,6 @@ etapa, para fácil ajuste.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 import json
 import random
@@ -515,6 +514,13 @@ class TecDocAutomator:
         self._context = browser.new_context(
             storage_state=str(config.SESSION_FILE) if config.SESSION_FILE.exists() else None,
         )
+        if config.BLOQUEAR_RECURSOS_PESADOS:
+            self._context.route(
+                "**/*",
+                lambda route: route.abort()
+                if route.request.resource_type in ("image", "font", "media")
+                else route.continue_(),
+            )
         # o Playwright não salva sessionStorage no storage_state; o Okta
         # guarda os tokens lá. Restauramos via init-script.
         if self._arquivo_sessionstorage().exists():
@@ -572,6 +578,13 @@ class TecDocAutomator:
             storage_state=str(config.SESSION_FILE)
             if config.SESSION_FILE.exists() else None,
         )
+        if config.BLOQUEAR_RECURSOS_PESADOS:
+            self._context.route(
+                "**/*",
+                lambda route: route.abort()
+                if route.request.resource_type in ("image", "font", "media")
+                else route.continue_(),
+            )
         if self._arquivo_sessionstorage().exists():
             self._restaurar_sessionstorage()
         self._page = self._context.new_page()
@@ -982,15 +995,12 @@ class TecDocAutomator:
             self._checar_desbloqueio()
             try:
                 linha = page.locator(SELETORES["resultado"]["linha"])
-                n = linha.count()
+                n, primeiro = linha.evaluate_all(
+                    "rows => [rows.length, rows[0]?.innerText?.slice(0, 60) || '']"
+                )
             except Exception:
                 n = 0
-            primeiro = ""
-            if n:
-                try:
-                    primeiro = linha.first.inner_text(timeout=800)[:60]
-                except Exception:
-                    pass
+                primeiro = ""
             if n == 0:
                 amostras.clear()
                 contagens.clear()
@@ -1713,9 +1723,6 @@ class TecDocAutomator:
 
         try:
             self._preencher_busca(codigo)
-            page.wait_for_load_state("networkidle", timeout=1_200)
-        except TimeoutError:
-            pass
         except BuscaNaoIniciadaError as exc:
             self._msg(str(exc))
             resultado.observacao = str(exc)

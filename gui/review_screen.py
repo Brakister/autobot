@@ -282,10 +282,10 @@ class ReviewScreen(QWidget):
         self.p_ficha.textChanged.connect(self._on_ficha_editada)
 
         acoes = QHBoxLayout()
-        btn_copiar = QPushButton("Copiar")
-        btn_copiar.setObjectName("primary")
-        btn_copiar.clicked.connect(self._copiar_ficha)
-        acoes.addWidget(btn_copiar)
+        self.btn_copiar = QPushButton("Copiar")
+        self.btn_copiar.setObjectName("primary")
+        self.btn_copiar.clicked.connect(self._copiar_ficha)
+        acoes.addWidget(self.btn_copiar)
         btn_regenerar = QPushButton("Regenerar da linha")
         btn_regenerar.clicked.connect(self._regenerar_ficha)
         acoes.addWidget(btn_regenerar)
@@ -380,7 +380,7 @@ class ReviewScreen(QWidget):
                 self, "Nada para copiar", "Selecione uma peça primeiro.")
             return
         QApplication.clipboard().setText(texto)
-        flash_sucesso(btn_copiar)
+        flash_sucesso(self.btn_copiar)
 
     def _regenerar_ficha(self):
         """Descarta a edição e regenera a ficha a partir dos dados da linha."""

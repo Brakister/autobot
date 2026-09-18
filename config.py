@@ -55,6 +55,10 @@ PLAYWRIGHT_TIMEOUT = 30_000
 GRID_STABLE_SAMPLES = 2
 PAUSE_BETWEEN_CODES = (0.8, 1.6)
 
+# A extração usa API/DOM textual; imagens, fontes e vídeos só aumentam o
+# trabalho do Chromium e o consumo de memória em máquinas mais fracas.
+BLOQUEAR_RECURSOS_PESADOS = True
+
 
 def pausa_entre_codigos() -> None:
     """Pausa curta e variável entre buscas consecutivas."""
