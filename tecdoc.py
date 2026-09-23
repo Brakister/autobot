@@ -383,6 +383,39 @@ def _limpar_codigo(txt) -> str:
     return "".join(str(txt).split())
 
 
+def _formatar_periodo_construcao(v: dict) -> str:
+    """Formata o período de construção de um veículo (aplicação).
+
+    A API do TecDoc devolve 'yearOfConstructionFrom'/'yearOfConstructionTo'
+    em AAAAMM (ex.: 201508, 202109). Vira texto útil para a ficha das
+    aplicações, só com o ano:
+
+      - só início  -> '2015-'
+      - início+fim -> '2015-2021'
+      - só fim     -> '-2021'
+      - ausente    -> ''
+
+    Só o ano (ex.: 2015) também é aceito e mantém o ano puro.
+    """
+    def aaaa(valor) -> str:
+        if not valor:
+            return ""
+        s = str(valor).strip()
+        if len(s) == 6 and s.isdigit():
+            return s[:4]  # AAAAMM -> AAAA (só o ano)
+        return s
+
+    de = aaaa(v.get("yearOfConstructionFrom"))
+    ate = aaaa(v.get("yearOfConstructionTo"))
+    if de and ate:
+        return f"{de}-{ate}"
+    if de:
+        return f"{de}-"
+    if ate:
+        return f"-{ate}"
+    return ""
+
+
 def _marca_casa(marca_lida: str, marcas: list[str]) -> bool:
     """Comparação tolerante marca lida x marcas selecionadas (não exata).
 
@@ -2898,6 +2931,9 @@ class TecDocAutomator:
                         ).strip()
                         if not nome:
                             continue
+                        periodo = _formatar_periodo_construcao(v)
+                        if periodo:
+                            nome = f"{nome} {periodo}"
                         if nome not in veiculos:
                             veiculos.append(nome)
             return veiculos
@@ -2945,21 +2981,28 @@ class TecDocAutomator:
                     
                     # Extrai ano
                     cells = row.locator('td, th')
-                    year_range = ''
+                    periodo = ''
                     for j in range(cells.count()):
                         cell_text = cells.nth(j).inner_text(timeout=500).strip()
-                        year_match = re.search(r'(\d{2}\.\d{4})(?:\s*[—-]\s*(\d{2}\.\d{4}))?', cell_text)
+                        year_match = re.search(
+                            r'(\d{2}\.\d{4})(?:\s*[—-]\s*(\d{2}\.\d{4}))?',
+                            cell_text,
+                        )
                         if year_match:
                             start_year = year_match.group(1).split('.')[1]
-                            end_year = year_match.group(2).split('.')[1] if year_match.group(2) else ''
-                            year_range = f"{start_year}-{end_year}" if end_year else f"{start_year}-"
+                            end_year = (year_match.group(2).split('.')[1]
+                                        if year_match.group(2) else '')
+                            if start_year and end_year:
+                                periodo = f"{start_year}-{end_year}"
+                            elif start_year:
+                                periodo = f"{start_year}-"
                             break
                     
-                    if not year_range:
+                    if not periodo:
                         continue
                     
                     # Formata aplicação
-                    app_line = f"{model_raw} {year_range}"
+                    app_line = f"{model_raw} {periodo}"
                     if app_line not in seen:
                         seen.add(app_line)
                         veiculos.append(app_line)

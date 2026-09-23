@@ -35,7 +35,7 @@ set "VER=%~1"
 if not defined VER (
     for /f "usebackq delims=" %%v in (`findstr /r "#define MyAppVersion" cadastroauto.iss`) do set "VERLINE=%%v"
     for /f "tokens=3 delims= " %%v in ("!VERLINE!") do set "VER=%%~v"
-    if not defined VER set "VER=1.2.1"
+    if not defined VER set "VER=1.2.2"
 )
 echo === Release CadastroAuto v%VER% ===
 echo.

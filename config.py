@@ -9,7 +9,7 @@ TECDOC_URL = "https://web.tecalliance.net/tecdoc/pt"
 LOGIN_URL = "https://login.tecalliance.net/app/UserHome?session_hint=AUTHENTICATED"
 
 # Versão do aplicativo (usada no auto-update) e repositório das releases.
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 GITHUB_REPO = "Brakister/autobot"
 
 
@@ -55,9 +55,11 @@ PLAYWRIGHT_TIMEOUT = 30_000
 GRID_STABLE_SAMPLES = 2
 PAUSE_BETWEEN_CODES = (0.8, 1.6)
 
-# A extração usa API/DOM textual; imagens, fontes e vídeos só aumentam o
-# trabalho do Chromium e o consumo de memória em máquinas mais fracas.
-BLOQUEAR_RECURSOS_PESADOS = True
+# Bloqueio de recursos pesados (imagens/fontes/vídeos) no Chromium.
+# Antes = True ganhava velocidade, mas como as imagens das peças são
+# essenciais para conferência visual durante a busca, deixamos tudo
+# carregar normalmente (False).
+BLOQUEAR_RECURSOS_PESADOS = False
 
 
 def pausa_entre_codigos() -> None:

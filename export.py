@@ -150,7 +150,7 @@ def texto_ficha(r: dict) -> str:
             codigos_unicos.append(c_upper)
     codigos_str = ",".join(codigos_unicos)
     if codigos_str:
-        codigos_str += ";"
+        codigos_str += ";" ":"
 
     aplicacoes = r.get("aplicacoes", [])
     aplicacoes_texto = (

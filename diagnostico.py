@@ -25,7 +25,7 @@ import getpass
 import json
 import sys
 from collections import Counter
-
+from pathlib import Path
 import config
 import tecdoc
 
