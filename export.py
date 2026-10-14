@@ -135,7 +135,9 @@ def texto_ficha(r: dict) -> str:
     descricao = str(r.get("descricao", "")).upper()
 
     cross_refs = r.get("cross_refs", [])
-    codigos_extra = []
+    # o código principal (o que foi pesquisado) entra na lista de CÓDIGOS junto
+    # das cross-references — assim dá pra copiar/colar a linha inteira de uma vez
+    codigos_extra = [codigo] if codigo else []
     for ref in cross_refs:
         if isinstance(ref, dict):
             codigos_extra.append(ref.get("codigo_ref", ""))
@@ -150,18 +152,18 @@ def texto_ficha(r: dict) -> str:
             codigos_unicos.append(c_upper)
     codigos_str = ",".join(codigos_unicos)
     if codigos_str:
-        codigos_str += ";" ":"
+        codigos_str += ";"
 
     aplicacoes = r.get("aplicacoes", [])
     aplicacoes_texto = (
         "\n".join(str(a).upper() for a in aplicacoes) if aplicacoes else "-"
     )
 
-    linhas.append(f"{codigo}   {marca}")
-    linhas.append("")
+    # código e marca não ficam mais no topo: o código vai para CÓDIGOS e a
+    # marca para MARCA (ambos mais abaixo), conforme o modelo revisado.
     if gtin:
         linhas.append(f"GTIN: {gtin}")
-    linhas.append("")
+        linhas.append("")
     linhas.append("PRODUTO:")
     linhas.append(descricao)
     linhas.append("")

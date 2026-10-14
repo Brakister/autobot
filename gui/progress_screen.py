@@ -68,9 +68,9 @@ class ProgressScreen(QWidget):
         eyebrow.setObjectName("eyebrow")
         root.addWidget(eyebrow)
 
-        titulo = QLabel("Buscando no TecDoc…")
-        titulo.setObjectName("title")
-        root.addWidget(titulo)
+        self.titulo = QLabel("Buscando no TecDoc…")
+        self.titulo.setObjectName("title")
+        root.addWidget(self.titulo)
 
         sub = QLabel(
             "A automação está aberta no navegador. NÃO feche a janela do "
@@ -182,6 +182,10 @@ class ProgressScreen(QWidget):
         self.btn_pause.setObjectName("secondary")
         self.btn_pause.style().unpolish(self.btn_pause)
         self.btn_pause.style().polish(self.btn_pause)
+
+    def set_titulo(self, texto: str):
+        """Troca o título da tela (ex.: 'Buscando no RockAuto…')."""
+        self.titulo.setText(texto)
 
     def continuar_em_andamento(self):
         """Volta do estado pausado para 'em andamento' (sem emitir sinal)."""

@@ -85,6 +85,65 @@ class _BuscaThread(QThread):
             self.falhou.emit(str(exc))
 
 
+class _RockAutoThread(QThread):
+    """Thread que roda a raspagem do RockAuto sem travar a GUI.
+
+    Mesmo papel do _BuscaThread, mas sem login/filtro de marcas: o RockAuto é
+    aberto e busca direto cada número. Pausa/destravar são suportados de forma
+    mínima (a parada respeita pausa entre códigos).
+    """
+
+    progresso = Signal(int, int, str)
+    resultado_parcial = Signal(dict)
+    concluido = Signal(list)
+    falhou = Signal(str)
+    abortado = Signal()
+    mensagem = Signal(str)
+
+    def __init__(self, codigos, headless):
+        super().__init__()
+        self.codigos = codigos
+        self.headless = headless
+        self._pausado = False
+        self._cancelar = False
+
+    def pausar(self):
+        self._pausado = True
+
+    def continuar(self):
+        self._pausado = False
+
+    def parar(self):
+        self._cancelar = True
+
+    def destravar(self):
+        # sem fila de reagendamento no RockAuto: apenas loga (no-op seguro)
+        self.mensagem.emit("Destravar só faz efeito na busca do TecDoc.")
+
+    def _aguardar_se_pausado(self):
+        while self._pausado:
+            if self._cancelar:
+                raise _AbortarBusca()
+            self.msleep(100)
+
+    def run(self):
+        import rockauto
+        try:
+            resultados = rockauto.executar_busca(
+                self.codigos,
+                headless=self.headless,
+                on_progress=lambda i, t, c: self.progresso.emit(i, t, c),
+                on_mensagem=lambda m: self.mensagem.emit(m),
+                on_pausa=lambda: self._aguardar_se_pausado(),
+                on_resultado=lambda r: self.resultado_parcial.emit(r),
+            )
+            self.concluido.emit(resultados)
+        except _AbortarBusca:
+            self.abortado.emit()
+        except Exception as exc:
+            self.falhou.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -101,7 +160,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.stack)
 
         self.login_screen = LoginScreen(self._pos_login)
-        self.input_screen = InputScreen(self._pos_input)
+        self.input_screen = InputScreen(self._pos_input, self._iniciar_busca_rockauto)
         self.brand_screen = BrandFilterScreen([], self._pos_brand)
         self.progress_screen = ProgressScreen()
         self.review_screen = None  # criado quando há resultados
@@ -163,6 +222,86 @@ class MainWindow(QMainWindow):
         self.progress_screen.destravar_solicitado.connect(self.thread.destravar)
         self.thread.start()
 
+    def _iniciar_busca_rockauto(self, codigos: list):
+        """Roda a raspagem do RockAuto para a lista inteira (mesmo fluxo)."""
+        self.codigos = codigos
+        self.codigos_sessao.extend(codigos)
+        self.marcas = []
+        self.progress_screen.set_titulo("Buscando no RockAuto…")
+        self.progress_screen.iniciar(len(self.codigos))
+        self.stack.setCurrentIndex(3)
+
+        self.thread = _RockAutoThread(codigos, self.headless)
+        self.thread.progresso.connect(self._on_progresso)
+        self.thread.resultado_parcial.connect(self._on_resultado_parcial)
+        self.thread.concluido.connect(self._on_concluido)
+        self.thread.falhou.connect(self._on_falha)
+        self.thread.abortado.connect(self._on_abortado)
+        self.thread.mensagem.connect(self._on_mensagem)
+        self.progress_screen.pausado.connect(self.thread.pausar)
+        self.progress_screen.continuar.connect(self.thread.continuar)
+        self.progress_screen.editar_parciais.connect(self._on_editar_parciais)
+        self.progress_screen.destravar_solicitado.connect(self.thread.destravar)
+        self.thread.start()
+
+    def _buscar_rockauto_peca(self, codigo: str):
+        """Botão 'Buscar no RockAuto' do painel da revisão: raspa 1 código."""
+        codigo = str(codigo or "").strip()
+        if not codigo:
+            return
+        self._thread_rockauto_peca = _RockAutoThread(
+            [{"codigo": codigo, "marca": ""}], self.headless
+        )
+        self._thread_rockauto_peca.mensagem.connect(self._on_mensagem)
+        self._thread_rockauto_peca.concluido.connect(
+            lambda res: self._on_rockauto_peca_pronto(codigo, res)
+        )
+        self._thread_rockauto_peca.falhou.connect(
+            lambda msg: self._ao_falha_rockauto_peca(codigo, msg)
+        )
+        self._thread_rockauto_peca.start()
+
+    def _ao_falha_rockauto_peca(self, codigo: str, msg: str):
+        if self.review_screen is not None:
+            self.review_screen._reativar_botao_rockauto()
+        QMessageBox.critical(
+            self, "Erro no RockAuto",
+            f"Não foi possível buscar '{codigo}' no RockAuto:\n{msg}",
+        )
+
+    def _on_rockauto_peca_pronto(self, codigo: str, resultados: list[dict]):
+        """Aplica o resultado do RockAuto na linha da peça selecionada."""
+        if self.review_screen is not None:
+            self.review_screen._reativar_botao_rockauto()
+        melhor = next(
+            (r for r in resultados if r.get("codigo") == codigo), None
+        )
+        if melhor is None and resultados:
+            melhor = resultados[0]
+        if melhor is None:
+            QMessageBox.information(
+                self, "RockAuto",
+                f"Nenhum resultado no RockAuto para '{codigo}'.",
+            )
+            return
+        # busc_um devolve dict vazio (disponivel=False) quando não achou nada
+        if not melhor.get("disponivel") or not str(melhor.get("descricao", "") or "").strip():
+            QMessageBox.information(
+                self, "RockAuto",
+                f"Nenhum resultado no RockAuto para '{codigo}'.",
+            )
+            return
+        if self.review_screen is not None:
+            self.review_screen.atualizar_resultado_rockauto(codigo, melhor)
+        rotulo = (
+            f"{melhor.get('descricao', '') or '—'}"
+            f"{' (' + melhor.get('observacao', '') + ')' if melhor.get('observacao') else ''}"
+        ).strip()
+        QMessageBox.information(
+            self, "RockAuto",
+            f"Dados do RockAuto aplicados em '{codigo}':\n{rotulo}",
+        )
+
     def _on_progresso(self, index: int, total: int, codigo: str):
         self.progress_screen.atualizar(index, total, codigo)
 
@@ -196,7 +335,8 @@ class MainWindow(QMainWindow):
                 return
         QMessageBox.critical(
             self, "Erro na automação",
-            f"A automação falhou:\n{msg}\n\nVerifique os seletores no tecdoc.py.",
+            f"A automação falhou:\n{msg}\n\n"
+            "Verifique os seletores no tecdoc.py / rockauto.py.",
         )
         self.stack.setCurrentIndex(1)
 
@@ -239,7 +379,8 @@ class MainWindow(QMainWindow):
         else:
             self.review_screen = ReviewScreen(
                 resultados, self._salvar, self._adicionar_codigos,
-                self._salvar_parcial_e_voltar
+                self._salvar_parcial_e_voltar,
+                on_rockauto_peca=self._buscar_rockauto_peca,
             )
         self.stack.addWidget(self.review_screen)
         self.stack.setCurrentWidget(self.review_screen)

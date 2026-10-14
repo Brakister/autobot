@@ -20,10 +20,39 @@ import database as db
 import export as exp
 
 
+def _mesclar_cross_refs(*listas) -> list:
+    """Une listas de cross_refs sem duplicar (por código, case-insensitive).
+
+    Aceita refs como dict {codigo_ref, marca_ref}, tupla (codigo, marca) ou
+    string simples (código). Mantém a ordem de chegada e o formato original.
+    """
+    vistos: set[str] = set()
+    unidos = []
+
+    def _codigo(ref) -> str:
+        if isinstance(ref, dict):
+            return str(ref.get("codigo_ref", "") or "")
+        if isinstance(ref, (tuple, list)) and len(ref) >= 1:
+            return str(ref[0])
+        return str(ref)
+
+    for lista in listas:
+        for ref in lista or []:
+            cod = _codigo(ref).strip()
+            if not cod:
+                continue
+            chave = cod.upper()
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            unidos.append(ref)
+    return unidos
+
+
 class ReviewScreen(QWidget):
     def __init__(self, resultados: list[dict], on_confirmar,
                  on_adicionar=None, on_salvar_e_voltar=None,
-                 modo="final", on_encerrar=None):
+                 modo="final", on_encerrar=None, on_rockauto_peca=None):
         """resultados: lista de dicts (cada um com codigo, descricao, marca,
         fornecedor, disponivel, observacao, cross_refs).
         on_confirmar: callback(lista_final) chamado ao confirmar.
@@ -33,13 +62,16 @@ class ReviewScreen(QWidget):
             - "Salvar parcial e voltar" vira "Encerrar automação e salvar agora"
             - botão "+ Adicionar códigos" é ocultado.
         on_encerrar: callback(resultados) quando modo='parcial' e o usuário
-            clica em "Encerrar automação e salvar agora"."""
+            clica em "Encerrar automação e salvar agora".
+        on_rockauto_peca: callback(codigo) para buscar a peça selecionada no
+            RockAuto (botão do painel individual)."""
         super().__init__()
         self.resultados = resultados
         self.on_confirmar = on_confirmar
         self.on_adicionar = on_adicionar
         self.on_salvar_e_voltar = on_salvar_e_voltar
         self.on_encerrar = on_encerrar
+        self.on_rockauto_peca = on_rockauto_peca
         self.modo = modo
         self._fichas: dict[str, str] = {}
         self._sel_codigo: str | None = None
@@ -241,6 +273,7 @@ class ReviewScreen(QWidget):
                 "aplicacoes": r.get("aplicacoes", []),
                 "codigos_aplicacao": r.get("codigos_aplicacao", []),
                 "url": r.get("url", ""),
+                "url_rockauto": r.get("url_rockauto", ""),
             },
         )
 
@@ -273,6 +306,15 @@ class ReviewScreen(QWidget):
         self.p_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
         v.addWidget(self.p_link)
 
+        # link "Ver em RockAuto" (mesma peça, outro site — pós-TecDoc)
+        self.p_link_rockauto = QLabel()
+        self.p_link_rockauto.setObjectName("subtitle")
+        self.p_link_rockauto.setWordWrap(True)
+        self.p_link_rockauto.setTextFormat(Qt.RichText)
+        self.p_link_rockauto.setOpenExternalLinks(True)
+        self.p_link_rockauto.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        v.addWidget(self.p_link_rockauto)
+
         self.p_ficha = QTextEdit()
         self.p_ficha.setFont(QFont("Consolas", 10))
         self.p_ficha.setPlaceholderText(
@@ -289,6 +331,13 @@ class ReviewScreen(QWidget):
         btn_regenerar = QPushButton("Regenerar da linha")
         btn_regenerar.clicked.connect(self._regenerar_ficha)
         acoes.addWidget(btn_regenerar)
+        self.btn_rockauto = QPushButton("Buscar no RockAuto")
+        self.btn_rockauto.setObjectName("secondary")
+        self.btn_rockauto.setToolTip(
+            "Raspa a peça selecionada no RockAuto e aplica os dados na linha."
+        )
+        self.btn_rockauto.clicked.connect(self._buscar_rockauto)
+        acoes.addWidget(self.btn_rockauto)
         acoes.addStretch(1)
         v.addLayout(acoes)
 
@@ -317,6 +366,7 @@ class ReviewScreen(QWidget):
         self.p_ficha.clear()
         self.p_ficha.blockSignals(False)
         self.p_link.setText("Produto referenciado: selecione uma peça.")
+        self.p_link_rockauto.setText("Ver em RockAuto: selecione uma peça.")
         self._sel_codigo = None
 
     def _mostrar_link(self, url: str):
@@ -331,6 +381,23 @@ class ReviewScreen(QWidget):
             f'Produto referenciado: <a href="{seguro}">{seguro}</a>'
         )
 
+    def _mostrar_link_rockauto(self, codigo: str, url: str = ""):
+        """Mostra o link 'Ver em RockAuto' da peça (abre no navegador)."""
+        codigo = (codigo or "").strip()
+        url = (url or "").strip()
+        if not codigo and not url:
+            self.p_link_rockauto.setText(
+                "Ver em RockAuto: link indisponível para esta peça.")
+            return
+        if not url:
+            import rockauto
+            url = rockauto.url_partsearch(codigo)
+        seguro = html.escape(url, quote=True)
+        rotulo = url.replace("https://", "").replace("http://", "")
+        self.p_link_rockauto.setText(
+            f'Ver em RockAuto: <a href="{seguro}">{rotulo}</a>'
+        )
+
     def _linha_do_codigo(self, codigo: str) -> int:
         for row in range(self.tabela.rowCount()):
             it = self.tabela.item(row, self.COL_CODIGO)
@@ -343,13 +410,25 @@ class ReviewScreen(QWidget):
         self.p_ficha.setPlainText(texto)
         self.p_ficha.blockSignals(False)
 
+    def _ficha_auto(self, codigo: str) -> str:
+        """Texto que a ficha teria se fosse gerada da linha, sem edição."""
+        row = self._linha_do_codigo(codigo)
+        if row < 0:
+            return ""
+        return exp.texto_ficha(self._linha_para_dict(row))
+
     def _on_ficha_editada(self):
-        """Mantém a edição da ficha atrelada à peça selecionada."""
+        """Mantém a edição da ficha atrelada à peça selecionada.
+
+        Só considera a ficha "personalizada" quando o texto difere do que a
+        linha geraria automaticamente. Navegar entre linhas não congela a
+        ficha, então aplicar o RockAuto depois consegue regenerá-la.
+        """
         codigo = self._sel_codigo
         if not codigo:
             return
         texto = self.p_ficha.toPlainText()
-        if texto.strip():
+        if texto.strip() and texto != self._ficha_auto(codigo):
             self._fichas[codigo] = texto
         else:
             self._fichas.pop(codigo, None)
@@ -368,6 +447,9 @@ class ReviewScreen(QWidget):
         codigo = str(dados.get("codigo", ""))
         self._sel_codigo = codigo
         self._mostrar_link(dados.get("url", ""))
+        self._mostrar_link_rockauto(
+            codigo, dados.get("url_rockauto", "")
+        )
         if codigo in self._fichas:
             self._set_ficha(self._fichas[codigo])
         else:
@@ -393,6 +475,83 @@ class ReviewScreen(QWidget):
         self._fichas.pop(codigo, None)
         self._set_ficha(exp.texto_ficha(self._linha_para_dict(row)))
 
+    # -- RockAuto no painel individual ---------------------------------------
+
+    def _buscar_rockauto(self):
+        """Consulta o RockAuto para a peça selecionada (via MainWindow)."""
+        codigo = self._sel_codigo
+        if not codigo:
+            QMessageBox.information(
+                self, "Nada selecionado",
+                "Selecione uma peça na tabela primeiro.")
+            return
+        if not self.on_rockauto_peca:
+            QMessageBox.information(
+                self, "Indisponível",
+                "A busca no RockAuto não está disponível neste fluxo.")
+            return
+        self.btn_rockauto.setEnabled(False)
+        self.btn_rockauto.setText("Buscando no RockAuto…")
+        self.on_rockauto_peca(codigo)
+
+    def _reativar_botao_rockauto(self):
+        self.btn_rockauto.setEnabled(True)
+        self.btn_rockauto.setText("Buscar no RockAuto")
+
+    def atualizar_resultado_rockauto(self, codigo: str, resultado: dict):
+        """Mescla o resultado do RockAuto na linha, SEM substituir o TecDoc.
+
+        TecDoc continua sendo o principal: descrição e marca só são
+        preenchidas se estiverem vazias. A observação ganha a categoria do
+        RockAuto como extra, os cross_refs são unidos (sem duplicar) e o link
+        'Ver em RockAuto' é gravado na linha.
+        """
+        codigo = str(codigo or "").strip()
+        self._reativar_botao_rockauto()
+        row = self._linha_do_codigo(codigo)
+        if row < 0:
+            return
+        descricao_ra = str(resultado.get("descricao", "") or "").strip()
+        marca_ra = str(resultado.get("marca", "") or "").strip()
+        categoria_ra = str(resultado.get("observacao", "") or "").strip()
+        url_rockauto = str(resultado.get("url", "") or "")
+        refs_ra = list(resultado.get("cross_refs") or [])
+
+        self.tabela.blockSignals(True)
+
+        # TecDoc é o principal: só preenche o que está vazio
+        item_desc = self.tabela.item(row, self.COL_DESCRICAO)
+        if not (item_desc.text() or "").strip() and descricao_ra:
+            item_desc.setText(descricao_ra)
+        item_marca = self.tabela.item(row, self.COL_MARCA)
+        if not (item_marca.text() or "").strip() and marca_ra:
+            item_marca.setText(marca_ra)
+
+        # observação: mantém a do TecDoc e adiciona a categoria do RockAuto
+        if categoria_ra:
+            item_obs = self.tabela.item(row, self.COL_OBS)
+            obs_atual = (item_obs.text() or "").strip()
+            marcador = f"RockAuto: {categoria_ra}"
+            if marcador not in obs_atual:
+                item_obs.setText(
+                    f"{obs_atual} | {marcador}" if obs_atual else marcador
+                )
+
+        # cross_refs: união dos do TecDoc com os do RockAuto (sem duplicar)
+        item_cod = self.tabela.item(row, self.COL_CODIGO)
+        refs_atuais = list(item_cod.data(Qt.UserRole) or [])
+        item_cod.setData(Qt.UserRole, _mesclar_cross_refs(refs_atuais, refs_ra))
+
+        extras = item_cod.data(Qt.UserRole + 1) or {}
+        extras["url_rockauto"] = url_rockauto
+        item_cod.setData(Qt.UserRole + 1, extras)
+        self.tabela.blockSignals(False)
+
+        # se o usuário ainda não personalizou a ficha, regenera com os dados novos
+        if self._sel_codigo == codigo and codigo not in self._fichas:
+            self._set_ficha(exp.texto_ficha(self._linha_para_dict(row)))
+            self._mostrar_link_rockauto(codigo, url_rockauto)
+
     def _linha_vazia(self, row: int) -> bool:
         it = self.tabela.item(row, self.COL_CODIGO)
         return it is None or not it.text()
@@ -413,6 +572,7 @@ class ReviewScreen(QWidget):
             "aplicacoes": extras.get("aplicacoes", []),
             "codigos_aplicacao": extras.get("codigos_aplicacao", []),
             "url": extras.get("url", ""),
+            "url_rockauto": extras.get("url_rockauto", ""),
         }
 
     # -- leitura ------------------------------------------------------------
@@ -443,6 +603,7 @@ class ReviewScreen(QWidget):
                 "aplicacoes": extras.get("aplicacoes", []),
                 "codigos_aplicacao": extras.get("codigos_aplicacao", []),
                 "url": extras.get("url", ""),
+                "url_rockauto": extras.get("url_rockauto", ""),
             })
         return finais
 

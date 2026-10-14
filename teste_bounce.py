@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import sys
 import time
-
+import playwright.sync_api
 from playwright.sync_api import Page
 
 from tecdoc import TecDocAutomator

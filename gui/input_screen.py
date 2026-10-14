@@ -49,9 +49,10 @@ def extrair_codigos(texto: str) -> list[dict[str, str]]:
 
 
 class InputScreen(QWidget):
-    def __init__(self, on_continue):
+    def __init__(self, on_continue, on_rockauto=None):
         super().__init__()
         self.on_continue = on_continue
+        self.on_rockauto = on_rockauto
         self._build()
 
     def _build(self):
@@ -112,6 +113,14 @@ class InputScreen(QWidget):
 
         btn_linha = QHBoxLayout()
         btn_linha.addStretch(1)
+        btn_rockauto = QPushButton("Buscar no RockAuto")
+        btn_rockauto.setObjectName("secondary")
+        btn_rockauto.setToolTip(
+            "Raspa a lista de códigos no RockAuto (sem precisar de login) "
+            "e segue para a revisão/salvar no mesmo fluxo do TecDoc."
+        )
+        btn_rockauto.clicked.connect(self._continuar_rockauto)
+        btn_linha.addWidget(btn_rockauto)
         btn_continuar = QPushButton("Continuar →")
         btn_continuar.setObjectName("primary")
         btn_continuar.clicked.connect(self._continuar)
@@ -168,3 +177,21 @@ class InputScreen(QWidget):
             return
         self.erro.setText("")
         self.on_continue(codigos)
+
+    def _continuar_rockauto(self):
+        """Botão 'Buscar no RockAuto': mesma validação, fluxo diferente."""
+        if not self.on_rockauto:
+            self.erro.setText("Busca no RockAuto indisponível neste fluxo.")
+            return
+        codigos = self._get_codigos()
+        if not codigos:
+            self.erro.setText("Nenhum código detectado.")
+            return
+        if len(codigos) > config.MAX_CODES_PER_RUN:
+            self.erro.setText(
+                f"Limite de {config.MAX_CODES_PER_RUN} códigos por execução.\n"
+                f"Você tem {len(codigos)}. Divida em lotes."
+            )
+            return
+        self.erro.setText("")
+        self.on_rockauto(codigos)
