@@ -78,6 +78,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE pecas ADD COLUMN aplicacoes TEXT")
         if "codigos_aplicacao" not in colunas:
             conn.execute("ALTER TABLE pecas ADD COLUMN codigos_aplicacao TEXT")
+        if "gtin" not in colunas:
+            conn.execute("ALTER TABLE pecas ADD COLUMN gtin TEXT")
 
         # limpeza de dados: códigos coletados do site às vezes vêm com espaços
         # internos (ex.: '038 121 011 B'); normaliza removendo todo whitespace.
@@ -163,6 +165,7 @@ def salvar_peca(
     cross_refs: list[tuple[str, str | None]] | None = None,
     aplicacoes: list[str] | None = None,
     codigos_aplicacao: list[str] | None = None,
+    gtin: str | None = None,
 ) -> None:
     """Insere (ou atualiza) uma peça e suas cross-references."""
     codigo = _limpar_codigo(codigo)
@@ -170,12 +173,13 @@ def salvar_peca(
         cross_refs = [(_limpar_codigo(r), m) for r, m in cross_refs]
     if codigos_aplicacao:
         codigos_aplicacao = [_limpar_codigo(c) for c in codigos_aplicacao]
+    gtin = (gtin or "").strip()
     with _connect() as conn:
         conn.execute(
                 """INSERT INTO pecas
                  (sessao_id, codigo, descricao, marca, fornecedor, disponivel,
-                                    url, observacao, aplicacoes, codigos_aplicacao, criada_em)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    url, observacao, aplicacoes, codigos_aplicacao, gtin, criada_em)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(sessao_id, codigo) DO UPDATE SET
                  descricao = excluded.descricao,
                  marca = excluded.marca,
@@ -184,13 +188,15 @@ def salvar_peca(
                  url = excluded.url,
                  observacao = excluded.observacao,
                  aplicacoes = excluded.aplicacoes,
-                 codigos_aplicacao = excluded.codigos_aplicacao
+                 codigos_aplicacao = excluded.codigos_aplicacao,
+                 gtin = excluded.gtin
             """,
             (
                 sessao_id, codigo, descricao, marca, fornecedor,
                 int(bool(disponivel)), url, observacao,
                 json.dumps(aplicacoes or [], ensure_ascii=False),
                 json.dumps(codigos_aplicacao or [], ensure_ascii=False),
+                gtin or None,
                 datetime.now().isoformat(),
             ),
         )

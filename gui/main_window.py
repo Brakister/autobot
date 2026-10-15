@@ -439,6 +439,7 @@ class MainWindow(QMainWindow):
                 aplicacoes=r.get("aplicacoes", []),
                 codigos_aplicacao=r.get("codigos_aplicacao", []),
                 url=r.get("url"),
+                gtin=r.get("gtin"),
             )
         db.concluir_sessao(sid)
 

@@ -2172,22 +2172,118 @@ class TecDocAutomator:
             self._dump_erro_detalhe(resultado)
 
     def _aguardar_detalhe(self, tentativas: int) -> bool:
-        """Aguarda a página do artigo renderizar (sumario ou tabela OE).
+        """Aguarda a página do artigo renderizar COM conteúdo de verdade.
 
         Dá um respiro inicial porque o shell do SPA (i18n, config, auth)
-        costuma demorar mais que a checagem imediata.
+        costuma demorar mais que a checagem imediata. Não basta o esqueleto do
+        resumo aparecer: quando o site não resolve o artigo (ex.: URL montada
+        com o número sem espaços) ele renderiza o sumário com rótulos mas
+        valores VAZIOS. Por isso só retorna True quando há conteúdo real.
         """
         page = self._page
         page.wait_for_timeout(700)
         for _ in range(tentativas):
             try:
-                if (page.locator(SELETORES["detalhe"]["sumario"]).count() > 0
-                        or page.locator(SELETORES["detalhe"]["lista_oe"]).count() > 0):
+                if self._detalhe_carregado():
                     return True
             except Exception:
                 pass
             time.sleep(0.5)
         return False
+
+    def _detalhe_carregado(self) -> bool:
+        """True se a página do artigo tem dados reais (não só o esqueleto).
+
+        Considera carregado quando o resumo tem ao menos um par rótulo/valor
+        preenchido (Marca, Número do artigo, GTIN/EAN, ...) OU a tabela
+        'Número OE' tem linhas.
+        """
+        page = self._page
+        try:
+            for i in range(page.locator("th[scope='row']").count()):
+                th = page.locator("th[scope='row']").nth(i)
+                td = th.locator("xpath=following-sibling::td[1]")
+                try:
+                    if td.count() and td.first.inner_text(timeout=600).strip():
+                        return True
+                except Exception:
+                    continue
+            if page.locator(
+                    "part-detail-v2-oe-table tr[ta-name='oe-number'], "
+                    "tr[ta-name='oe-number']").count() > 0:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _abrir_detalhe_por_clique(self, row_id: str,
+                                  resultado: PecaResultado) -> bool:
+        """Abre o artigo CLICANDO no número do artigo na grid de resultados.
+
+        Fallback da navegação direta: quando o código pesquisado não é o
+        número do artigo, o site só resolve o detalhe a partir do contexto da
+        própria grid (o clique), então voltamos para a URL da busca, localiza
+        a MESMA linha (pelo row-id) e clica no link do artigo.
+        """
+        page = self._page
+        try:
+            if self._url_ultima_busca:
+                page.goto(self._url_ultima_busca,
+                          wait_until="domcontentloaded")
+                self._aguardar_grid_estavel()
+            alvo = None
+            if row_id:
+                try:
+                    cand = page.locator(
+                        f'.ag-row[row-id="{row_id}"]')
+                    if cand.count() > 0:
+                        alvo = cand.first
+                except Exception:
+                    alvo = None
+            if alvo is None:
+                linhas = page.locator(
+                    ".ag-row[row-id], table tbody tr, "
+                    ".article-row, .result-row")
+                if linhas.count() == 0:
+                    self._rastro_abrir(
+                        f"[{resultado.codigo}] clique: grid vazia ao voltar.")
+                    return False
+                alvo = linhas.first
+            cel = alvo.locator("[col-id='articleNo']").first
+            usado = "cell"
+            if cel.count() == 0:
+                cel = alvo.locator("[col-id='articleNo'] a").first
+                usado = "cell.a"
+            if cel.count() == 0:
+                cel = alvo
+                usado = "row"
+            try:
+                cel.scroll_into_view_if_needed(timeout=2_000)
+            except Exception:
+                pass
+            self._rastro_abrir(
+                f"[{resultado.codigo}] clique: row_id_match="
+                f"{alvo.get_attribute('row-id', timeout=600)!r} "
+                f"sel={usado} cel_count={cel.count()}")
+            cel.click(timeout=4_000)
+            page.wait_for_timeout(600)
+            if ("catalog-not-found" in page.url
+                    or page.url.rstrip("/") == "https://web.tecalliance.net"):
+                self._rastro_abrir(
+                    f"[{resultado.codigo}] clique caiu fora do catálogo "
+                    f"({page.url[:180]}).")
+                return False
+            if not self._aguardar_detalhe(40):
+                self._rastro_abrir(
+                    f"[{resultado.codigo}] clique não carregou o artigo.")
+                return False
+            page.wait_for_timeout(300)
+            self._extrair_detalhe(resultado)
+            return True
+        except Exception as exc:
+            self._rastro_abrir(
+                f"[{resultado.codigo}] clique falhou: {exc!r}")
+            return False
 
     def _abrir_detalhe_direto(self, linha, resultado: PecaResultado) -> bool:
         """Navega direto para a página do artigo, montando a URL do site.
@@ -2201,6 +2297,7 @@ class TecDocAutomator:
         article_no = ""
         href_artigo = ""
         row_brand_id = ""
+        row_id = ""
         try:
             row_id = linha.get_attribute("row-id", timeout=800) or ""
             match = re.search(r"\[(\d+)\]-\[(.+)\]", row_id)
@@ -2284,35 +2381,49 @@ class TecDocAutomator:
                 self._rastro_abrir(f"goto direto: {nova_url[:200]}")
                 page.goto(nova_url, wait_until="domcontentloaded")
             page.wait_for_timeout(400)
-            # se o site derrubou na raiz/catálogo inexistente, não insiste
+            # se o site derrubou na raiz/catálogo inexistente, cai pro clique
+            # na grid (o código buscado nem sempre é o número do artigo).
+            ok = False
             if ("catalog-not-found" in page.url
                     or page.url.rstrip("/") == "https://web.tecalliance.net"):
                 self._rastro_abrir(
                     f"[{resultado.codigo}] goto direto caiu fora do catálogo "
                     f"({page.url[:180]}).")
-                return False
-            ok = self._aguardar_detalhe(40)
-            if not ok:
-                # SPA às vezes ignora o primeiro goto (cache/timing); recarrega
-                # a mesma URL uma única vez antes de desistir
-                self._rastro_abrir(
-                    f"[{resultado.codigo}] goto direto não renderizou; "
-                    f"recarregando: {page.url[:180]}")
-                try:
-                    page.reload(wait_until="domcontentloaded")
-                except Exception:
-                    pass
-                page.wait_for_timeout(500)
-                ok = self._aguardar_detalhe(50)
-                self._rastro_abrir(f"[{resultado.codigo}] retry "
-                                   f"{'ok' if ok else 'continua sem renderizar'}.")
-            if not ok:
-                self._rastro_abrir(
-                    f"[{resultado.codigo}] goto direto não abriu o artigo.")
-                return False
-            page.wait_for_timeout(300)
-            self._extrair_detalhe(resultado)
-            return True
+            else:
+                ok = self._aguardar_detalhe(40)
+                if not ok:
+                    # SPA às vezes ignora o primeiro goto (cache/timing);
+                    # recarrega a mesma URL uma única vez antes de desistir
+                    self._rastro_abrir(
+                        f"[{resultado.codigo}] goto direto não renderizou; "
+                        f"recarregando: {page.url[:180]}")
+                    try:
+                        page.reload(wait_until="domcontentloaded")
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(500)
+                    ok = self._aguardar_detalhe(50)
+                    self._rastro_abrir(
+                        f"[{resultado.codigo}] retry "
+                        f"{'ok' if ok else 'continua sem renderizar'}.")
+            if ok:
+                page.wait_for_timeout(300)
+                self._extrair_detalhe(resultado)
+                return True
+            # ---- fallback: abrir pelo CLIQUE na grid -----------------------
+            # A navegação direta falha quando o código pesquisado NÃO é o
+            # número do artigo (ex.: 31336855440 -> SWAG "20 93 9953"): a URL
+            # montada com o número "limpo" (sem espaços) cai em "Nenhum artigo
+            # encontrado". O clique na célula do número do artigo é o que o
+            # site resolve corretamente, então tentamos ele antes de desistir.
+            self._rastro_abrir(
+                f"[{resultado.codigo}] detalhe direto não carregou o artigo; "
+                f"tentando clique na grid (row={row_id}).")
+            if self._abrir_detalhe_por_clique(row_id, resultado):
+                return True
+            self._rastro_abrir(
+                f"[{resultado.codigo}] goto direto não abriu o artigo.")
+            return False
         except Exception as exc:
             self._msg(f"Detalhe direto falhou: {exc}")
             return False
